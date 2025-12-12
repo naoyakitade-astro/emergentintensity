@@ -1,7 +1,9 @@
 # ============================================================
-# Kitade & Kataoka (2026) emergent Stokes I/Q interpolator
-#   - thin/thick patches are kept
-#   - Q_table.inp (Eq.10) is loaded from DATA_DIR and used for tau in [1e-4, 1e-2]
+# Kitade & Kataoka (2026) emergent Stokes calculator
+#   - Stokes I and Q interpolator for for tau in [1e-2, 15.0]
+#   - Using saturated values of I and Q at optically thick side for tau > 15.0
+#   - simple analytic formula of Stokes I for tau < 1e-2
+#   - Q_table.inp (Eq.B10) is loaded from DATA_DIR and used for tau in [1e-4, 1e-2]
 #   - smooth connection for Q in [0.01, 0.03] using Eq.10 -> RT Hermite bridge
 # ============================================================
 
@@ -32,8 +34,7 @@ TAU_EQ10_USE_MIN = 1e-4
 
 def load_emergent_file(path):
     """
-    Read a single emergent table file (I / Q / PF).
-    NOTE: PF files can be parsed, but they will be ignored by collector.
+    Read a single emergent table file (I / Q).
 
     Expected file structure:
         # I table
@@ -49,7 +50,7 @@ def load_emergent_file(path):
 
     Returns a dict:
         {
-          "kind": "I" / "Q" / "PF",
+          "kind": "I" / "Q",
           "omega": np.ndarray (N_omega,),
           "mu":    np.ndarray (N_mu,),
           "tau_max": float,
@@ -562,7 +563,7 @@ def load_Q_thin_table(path):
 # load the table once (from DATA_DIR)
 try:
     Q_THIN_TABLE = load_Q_thin_table(Path(DATA_DIR) / "Q_table.inp")
-    print(f"Loaded Q_THIN_TABLE from {Path(DATA_DIR) / 'Q_table.inp'}")
+    # print(f"Loaded Q_THIN_TABLE from {Path(DATA_DIR) / 'Q_table.inp'}")
 except FileNotFoundError:
     print(f"{Path(DATA_DIR) / 'Q_table.inp'} not found; Q_THIN_TABLE will remain None.")
 
@@ -937,7 +938,7 @@ def emergent_polarization(tau_max, omega, inc_deg, mode="Q_over_I"):
 # ============================================================
 
 TABLES, INTERP_TABLES = setup_tables(DATA_DIR)
-
+'''
 print("Loaded tau grid and available kinds (loaded from files):")
 for tau in sorted(TABLES.keys()):
     kinds = [k for k in ["I", "Q"] if k in TABLES[tau]]
@@ -950,5 +951,5 @@ if Q_THIN_TABLE is not None:
     print("Eq10 tau_grid[0:3]  =", Q_THIN_TABLE["tau_grid"][:3])
     print("Eq10 tau_grid[-3:] =", Q_THIN_TABLE["tau_grid"][-3:])
     print("TAU_EQ10_USE_MIN =", TAU_EQ10_USE_MIN)
-
+'''
 
