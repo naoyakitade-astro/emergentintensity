@@ -953,3 +953,191 @@ if Q_THIN_TABLE is not None:
     print("TAU_EQ10_USE_MIN =", TAU_EQ10_USE_MIN)
 '''
 
+
+# ============================================================
+# Extra
+# ============================================================
+
+# ============================================================
+# Analytic approximations used in draft Fig.9 (verbatim formulas)
+#   Carrasco-Gonzalez+2019 : Eq.(15)-(16)
+#   Birnstiel+2018         : Eq.(17) with piecewise tau in S_nu
+#   Zhu+2019               : Eq.(18) (no piecewise tau in S_nu)
+#   Shared source function : Eq.(19)
+#
+# All functions return I_over_Bnu (dimensionless).
+# ============================================================
+
+import numpy as np
+
+
+def _mu_from_inc_deg(inc_deg):
+    mu = float(np.cos(np.deg2rad(float(inc_deg))))
+    # avoid division by zero (edge-on)
+    return float(np.clip(mu, 1e-12, 1.0))
+
+
+def _eps_from_omega(omega):
+    # epsilon = sqrt(1-omega)
+    omega = float(omega)
+    return float(np.sqrt(max(0.0, 1.0 - omega)))
+
+
+def S_eddington_over_Bnu(tau, tau_max, omega):
+    """
+    Draft Eq.(19): source function S_nu / B_nu for isotropic scattering slab.
+
+    S/B = (1-omega) + omega * [ 1 + ( exp(-sqrt(3)*eps*tau) + exp(sqrt(3)*eps*(tau - tau_max)) )
+                               / ( exp(-sqrt(3)*eps*tau_max)*(eps-1) - (eps+1) ) ]
+
+    Parameters
+    ----------
+    tau : float
+        Optical depth (the location where S is evaluated).
+    tau_max : float
+        Total slab optical depth.
+    omega : float
+        Single scattering albedo.
+
+    Returns
+    -------
+    float : S/B
+    """
+    tau = float(tau)
+    tau_max = float(tau_max)
+    omega = float(omega)
+
+    if tau_max <= 0.0:
+        return 1.0  # irrelevant; safe fallback
+    if omega <= 0.0:
+        return 1.0  # pure absorption: S=B
+
+    eps = _eps_from_omega(omega)
+    a = np.sqrt(3.0) * eps
+
+    # denominator in Eq.(19) (same structure as Eq.(16) denominator)
+    D = np.exp(-a * tau_max) * (eps - 1.0) - (eps + 1.0)
+
+    # numerical safety (avoid literal zero)
+    if abs(D) < 1e-300:
+        D = np.copysign(1e-300, D)
+
+    num = np.exp(-a * tau) + np.exp(a * (tau - tau_max))
+
+    S_over_B = (1.0 - omega) + omega * (1.0 + num / D)
+    return float(S_over_B)
+
+
+def I_birnstiel2018_over_Bnu(tau_max, omega, inc_deg):
+    """
+    Draft Eq.(17) (Birnstiel+2018):
+
+        I = (1 - exp(-tau_max/mu)) * S( tau = 2mu/3 )
+
+    with the piecewise rule written right under Eq.(17) in the draft:
+        If tau_max < 4mu/3, use tau in S as tau = tau_max/2.
+
+    S is given by draft Eq.(19).
+
+    Returns I/B.
+    """
+    tau_max = float(tau_max)
+    omega = float(omega)
+    mu = _mu_from_inc_deg(inc_deg)
+
+    if tau_max <= 0.0:
+        return 0.0
+    if omega <= 0.0:
+        # pure absorption: I/B = 1 - exp(-tau_max/mu)
+        return float(1.0 - np.exp(-tau_max / mu))
+
+    pref = 1.0 - np.exp(-tau_max / mu)
+
+    # piecewise tau choice (from the draft text under Eq.(17))
+    if tau_max < (4.0 * mu / 3.0):
+        tau_eval = tau_max / 2.0
+    else:
+        tau_eval = 2.0 * mu / 3.0
+
+    S_over_B = S_eddington_over_Bnu(tau_eval, tau_max, omega)
+    return float(pref * S_over_B)
+
+
+def I_zhu2019_over_Bnu(tau_max, omega, inc_deg):
+    """
+    Draft Eq.(18) (Zhu+2019):
+
+        I = (1 - exp(-tau_max/mu)) * S( tau = 2mu*tau_max / (3*tau_max + 1) )
+
+    S is given by draft Eq.(19).
+
+    Returns I/B.
+    """
+    tau_max = float(tau_max)
+    omega = float(omega)
+    mu = _mu_from_inc_deg(inc_deg)
+
+    if tau_max <= 0.0:
+        return 0.0
+    if omega <= 0.0:
+        return float(1.0 - np.exp(-tau_max / mu))
+
+    pref = 1.0 - np.exp(-tau_max / mu)
+
+    tau_eval = (2.0 * mu * tau_max) / (3.0 * tau_max + 1.0)
+
+    S_over_B = S_eddington_over_Bnu(tau_eval, tau_max, omega)
+    return float(pref * S_over_B)
+
+
+def I_carrasco2019_over_Bnu(tau_max, omega, inc_deg):
+    """
+    Draft Eq.(15)-(16) (Carrasco-Gonzalez+2019):
+
+    Eq.(15):
+        I/B = (1 - exp(-tau_max/mu)) + omega * F(tau_max, omega, mu)
+
+    Eq.(16):
+        F = 1/D * [ (1 - exp(-(sqrt3*eps + 1/mu)*tau_max)) / (sqrt3*eps*mu + 1)
+                    + (exp(-tau_max/mu) - exp(-sqrt3*eps*tau_max)) / (sqrt3*eps*mu - 1) ]
+
+        D = exp(-sqrt3*eps*tau_max)*(eps-1) - (eps+1)
+        eps = sqrt(1-omega)
+
+    Returns I/B.
+    """
+    tau_max = float(tau_max)
+    omega = float(omega)
+    mu = _mu_from_inc_deg(inc_deg)
+
+    if tau_max <= 0.0:
+        return 0.0
+    if omega <= 0.0:
+        return float(1.0 - np.exp(-tau_max / mu))
+
+    eps = _eps_from_omega(omega)
+    a = np.sqrt(3.0) * eps  # sqrt3*eps
+
+    # D in Eq.(16)
+    D = np.exp(-a * tau_max) * (eps - 1.0) - (eps + 1.0)
+    if abs(D) < 1e-300:
+        D = np.copysign(1e-300, D)
+
+    # term1: always safe
+    term1 = (1.0 - np.exp(-(a + 1.0 / mu) * tau_max)) / (a * mu + 1.0)
+
+    # term2: potential 0/0 when (a*mu - 1) -> 0
+    denom2 = (a * mu - 1.0)
+    if abs(denom2) < 1e-10:
+        # limit of (exp(-tau/mu) - exp(-a*tau)) / (a*mu - 1)
+        # with a -> 1/mu  =>  (tau/mu) * exp(-tau/mu)
+        term2 = (tau_max / mu) * np.exp(-tau_max / mu)
+    else:
+        term2 = (np.exp(-tau_max / mu) - np.exp(-a * tau_max)) / denom2
+
+    F = (term1 + term2) / D
+
+    I_over_B = (1.0 - np.exp(-tau_max / mu)) + omega * F
+    return float(I_over_B)
+    
+
