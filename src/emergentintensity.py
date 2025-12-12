@@ -1,6 +1,5 @@
 # ============================================================
 # Kitade & Kataoka (2026) emergent Stokes I/Q interpolator
-#   - PF fully removed (no PF file load, no PF table, no PF outputs)
 #   - thin/thick patches are kept
 #   - Q_table.inp (Eq.10) is loaded from DATA_DIR and used for tau in [1e-4, 1e-2]
 #   - smooth connection for Q in [0.01, 0.03] using Eq.10 -> RT Hermite bridge
