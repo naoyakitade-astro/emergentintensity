@@ -13,6 +13,11 @@ cd emergentintensity
 pip install -e .
 ```
 
+### Requirements
+- Python >= 3.9
+- NumPy
+- Matplotlib (only for plotting examples/notebooks)
+
 ## Quick start
 
 ```python
@@ -27,6 +32,11 @@ print("I/Bnu =", I)
 print("Q/Bnu =", Q)
 print("Q/I   =", Q/I if I != 0 else 0.0)
 ```
+
+### Troubleshooting
+If you see `INTERP_TABLES is None`, make sure you imported the package from the repository root
+(or that the data path is set correctly). The tables are expected under `data/` by default.
+
 
 ## Repository layout
 - `src/emergentintensity.py` : main code
@@ -48,3 +58,6 @@ Example notebooks are provided in notebooks/:
 
 If you use this code or the tables, please cite:
 - Kitade & Kataoka (2026, in prep.)
+
+## License
+MIT
