@@ -51,11 +51,14 @@ By default, the code searches tables in data/ (repository root).
 Example notebooks in [`notebooks/`](notebooks/):
 
 - [`exampleusage.ipynb`](notebooks/exampleusage.ipynb): basic usage
+- [`plot_emergent_intensity.ipynb`](notebooks/plot_emergent_intensity.ipynb): plotting helper
 - [`plot_regimes.ipynb`](notebooks/plot_regimes.ipynb): regime map
-- [`plot_fig3.ipynb`](notebooks/plot_fig3.ipynb): draft Fig.3 reproduction
-- [`plot_fig4.ipynb`](notebooks/plot_fig4.ipynb): draft Fig.4 reproduction
-- [`plot_fig9.ipynb`](notebooks/plot_fig9.ipynb): comparison with analytic formulae
-- [`plot_emergent_intensity.ipynb`](notebooks/plot_emergent_intensity.ipynb): plotting helper## Citation
+- [`plot_fig3.ipynb`](notebooks/plot_fig3.ipynb): Fig.3 reproduction
+- [`plot_fig4.ipynb`](notebooks/plot_fig4.ipynb): Fig.4 reproduction
+- [`plot_fig9.ipynb`](notebooks/plot_fig9.ipynb): Fig.9 reproduction; comparison with analytic formulae
+
+
+## Citation
 
 If you use this code or the tables, please cite:
 - Kitade & Kataoka (2026, in prep.)
