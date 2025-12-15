@@ -11,6 +11,7 @@ Polarization fraction is computed as **Q/I** (no PF tables are used).
 git clone https://github.com/astroaki/emergentintensity.git
 cd emergentintensity
 pip install -e .
+```
 
 ## Quick start
 
