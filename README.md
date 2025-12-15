@@ -15,6 +15,7 @@ pip install -e .
 
 ## Quick start
 
+```python
 from emergentintensity import emergent_stokes
 
 tau_max = 0.1
@@ -25,7 +26,7 @@ I, Q = emergent_stokes(tau_max, omega, inc_deg)
 print("I/Bnu =", I)
 print("Q/Bnu =", Q)
 print("Q/I   =", Q/I if I != 0 else 0.0)
-
+```
 
 ## Repository layout
 - `src/emergentintensity.py` : main code
