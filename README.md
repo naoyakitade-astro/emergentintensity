@@ -60,7 +60,7 @@ This package is based on precomputed RT tables. Please keep inputs within the ta
   - Do not use `omega > 0.9` (results are not validated).
 
 - Inclination `inc_deg`:
-  - Recommended: avoid exactly `90°`.
+  - use up to 89.0 degree.
 
 - total vertical extinction optical depth `tau_max`:
   - RT tables are provided for `tau_max` in [0.01, 15].
