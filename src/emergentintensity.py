@@ -1139,5 +1139,263 @@ def I_carrasco2019_over_Bnu(tau_max, omega, inc_deg):
 
     I_over_B = (1.0 - np.exp(-tau_max / mu)) + omega * F
     return float(I_over_B)
-    
+
+
+# ============================================================
+# Fitting formulae utilities (Eq.20 / Eq.21) for draft figures
+#   - Designed for notebook usage
+#   - SciPy is imported only inside fit functions
+# ============================================================
+
+TAU_SWITCH_EQ20 = 0.04
+PF_EXP_EQ21 = 0.8
+
+def eq20_I_over_Bnu(tau, mu, omega_like, I_conv, A_I, B_I, tau_switch=TAU_SWITCH_EQ20):
+    """
+    Draft Eq.(20) for emergent intensity I/Bnu.
+
+    tau < tau_switch:
+        I = (1 - omega_like) * tau/mu
+
+    tau >= tau_switch:
+        I = I_conv [1 - exp(-A_I tau^{B_I})]
+          - I_conv [1 - exp(-A_I tau_switch^{B_I})]
+          + (1 - omega_like) * tau_switch/mu
+
+    Returns array with same shape as tau.
+    """
+    tau = np.asarray(tau, dtype=float)
+    mu = float(mu)
+
+    omega_like = float(omega_like)
+    I_conv = float(I_conv)
+    A_I = float(A_I)
+    B_I = float(B_I)
+
+    tau0 = float(tau_switch)
+    I = np.empty_like(tau, dtype=float)
+
+    m_thin = (1.0 - omega_like) / max(mu, 1e-300)
+    mask_thin = (tau < tau0)
+    mask_thick = ~mask_thin
+
+    I[mask_thin] = m_thin * tau[mask_thin]
+
+    t = np.clip(tau[mask_thick], 1e-300, None)
+    tpow = np.power(t, B_I)
+    t0pow = float(np.power(tau0, B_I))
+
+    # continuity-enforced thick expression
+    I[mask_thick] = I_conv * (np.exp(-A_I * t0pow) - np.exp(-A_I * tpow)) + m_thin * tau0
+    return I
+
+
+def eq21_PF(tau, A_PF, B_PF, PF_conv, tau0, pf_exp=PF_EXP_EQ21):
+    """
+    Draft Eq.(21) for PF (=Q/I).
+
+      PF = A_PF * tau^{B_PF} * exp(-(tau/tau0)^pf_exp)
+         + PF_conv * [1 - exp(-(tau/tau0)^pf_exp)]
+    """
+    tau = np.asarray(tau, dtype=float)
+    A_PF = float(A_PF)
+    B_PF = float(B_PF)
+    PF_conv = float(PF_conv)
+    tau0 = float(tau0)
+
+    x = np.power(np.clip(tau / max(tau0, 1e-300), 1e-300, None), float(pf_exp))
+    e = np.exp(-x)
+    return A_PF * np.power(np.clip(tau, 1e-300, None), B_PF) * e + PF_conv * (1.0 - e)
+
+
+def get_tau_grid_rt_only():
+    """
+    Return the RT-table tau grid (INTERP_TABLES['tau_grid']).
+    """
+    if INTERP_TABLES is None:
+        setup_tables()
+    return np.asarray(INTERP_TABLES["tau_grid"], dtype=float)
+
+
+def compute_IQ_rt_on_grid(tau_grid, omega, inc_deg):
+    """
+    Compute (I, Q) on specified tau_grid using pure RT interpolation (interpolate_stokes).
+    Returns (I_arr, Q_arr) arrays.
+    """
+    tau_grid = np.asarray(tau_grid, dtype=float)
+    I = np.empty_like(tau_grid, dtype=float)
+    Q = np.empty_like(tau_grid, dtype=float)
+    for k, t in enumerate(tau_grid):
+        Ik, Qk = interpolate_stokes(float(t), float(omega), float(inc_deg))
+        I[k] = float(Ik)
+        Q[k] = float(Qk)
+    return I, Q
+
+
+def compute_PF_from_IQ(I, Q, floor_I=0.0):
+    """
+    PF = Q/I (signed). If I is zero (or below floor_I), PF is set to 0.
+    """
+    I = np.asarray(I, dtype=float)
+    Q = np.asarray(Q, dtype=float)
+    PF = np.zeros_like(I, dtype=float)
+    m = np.abs(I) > float(floor_I)
+    PF[m] = Q[m] / I[m]
+    return PF
+
+
+def fit_eq20_coeffs_I(tau_grid, I_num, mu, tau_switch=TAU_SWITCH_EQ20, floor_rel=1e-12):
+    """
+    Fit Eq.(20) coefficients for I on RT domain only.
+
+    Returns dict:
+      {"omega_like":..., "I_conv":..., "A_I":..., "B_I":...}
+    """
+    from scipy.optimize import least_squares  # local import
+
+    tau_grid = np.asarray(tau_grid, dtype=float)
+    I_num = np.asarray(I_num, dtype=float)
+    mu = float(mu)
+    tau0 = float(tau_switch)
+
+    # omega_like from thin slope (tau < tau_switch)
+    msk_thin = (tau_grid < tau0)
+    if np.count_nonzero(msk_thin) >= 2:
+        t = tau_grid[msk_thin]
+        y = I_num[msk_thin]
+        denom = float(np.dot(t, t))
+        slope = float(np.dot(t, y) / denom) if denom > 0 else 0.0
+        omega_like = 1.0 - mu * slope
+        omega_like = float(np.clip(omega_like, 0.0, 1.0))
+    else:
+        omega_like = 0.5
+
+    # fit thick params on tau >= tau_switch
+    msk_thick = (tau_grid >= tau0)
+    t_fit = tau_grid[msk_thick]
+    y_fit = I_num[msk_thick]
+
+    if t_fit.size < 3:
+        return {"omega_like": omega_like, "I_conv": float(np.clip(I_num[-1], 0.0, 2.0)), "A_I": 1.0, "B_I": 1.0}
+
+    I_conv0 = float(np.clip(I_num[-1], 1e-6, 2.0))
+    A0, B0 = 1.0, 1.0
+
+    def residual(p):
+        I_conv, A_I, B_I = p
+        model = eq20_I_over_Bnu(t_fit, mu, omega_like, I_conv, A_I, B_I, tau_switch=tau0)
+        return (model - y_fit) / np.maximum(np.abs(y_fit), float(floor_rel))
+
+    lb = [0.0, 1e-8, 0.0]
+    ub = [2.0, 1e3, 5.0]
+
+    res = least_squares(
+        residual,
+        x0=np.array([I_conv0, A0, B0], dtype=float),
+        bounds=(lb, ub),
+        method="trf",
+        ftol=1e-12, xtol=1e-12, gtol=1e-12,
+        max_nfev=20000,
+    )
+
+    I_conv, A_I, B_I = map(float, res.x)
+    return {"omega_like": omega_like, "I_conv": I_conv, "A_I": A_I, "B_I": B_I}
+
+
+def fit_eq21_coeffs_PF(tau_grid, PF_num, floor_rel=1e-4, pf_exp=PF_EXP_EQ21):
+    """
+    Fit Eq.(21) coefficients for PF (=Q/I), signed.
+
+    Returns dict:
+      {"A_PF":..., "B_PF":..., "PF_conv":..., "tau0":...}
+    """
+    from scipy.optimize import least_squares  # local import
+
+    tau_grid = np.asarray(tau_grid, dtype=float)
+    PF_num = np.asarray(PF_num, dtype=float)
+
+    PF_conv0 = float(PF_num[-1])
+    tau0_0 = 1.0
+    B0 = 1.0
+
+    j0 = 0
+    while j0 < len(tau_grid) and tau_grid[j0] <= 0:
+        j0 += 1
+    if j0 >= len(tau_grid):
+        A0 = 0.0
+    else:
+        t0 = float(tau_grid[j0])
+        A0 = float(PF_num[j0] / max(t0**B0, 1e-300))
+
+    def residual(p):
+        A_PF, B_PF, PF_conv, tau0 = p
+        model = eq21_PF(tau_grid, A_PF, B_PF, PF_conv, tau0, pf_exp=pf_exp)
+        return (model - PF_num) / np.maximum(np.abs(PF_num), float(floor_rel))
+
+    lb = [-5.0, 0.0, 0.0, 1e-4]
+    ub = [ 5.0, 5.0, 0.2, 1e2]
+
+    res = least_squares(
+        residual,
+        x0=np.array([A0, B0, PF_conv0, tau0_0], dtype=float),
+        bounds=(lb, ub),
+        method="trf",
+        ftol=1e-12, xtol=1e-12, gtol=1e-12,
+        max_nfev=30000,
+    )
+
+    A_PF, B_PF, PF_conv, tau0 = map(float, res.x)
+    return {"A_PF": A_PF, "B_PF": B_PF, "PF_conv": PF_conv, "tau0": tau0}
+
+
+def fit_eq20_eq21_coeffs_for_omegas(
+    inc_deg,
+    omega_list_I=None,
+    omega_list_PF=None,
+    tau_grid=None,
+    tau_switch=TAU_SWITCH_EQ20,
+    floor_I_rel=1e-12,
+    floor_PF_rel=1e-4,
+    exclude_omega0_in_PF=True,
+):
+    """
+    Convenience: for a fixed inclination, fit Eq.(20) for I and Eq.(21) for PF
+    across a list of omegas, using RT tau_grid only.
+
+    Returns:
+      coeff_I:  dict[omega] -> dict(omega_like, I_conv, A_I, B_I)
+      coeff_PF: dict[omega] -> dict(A_PF, B_PF, PF_conv, tau0)
+      tau_grid_used
+      mu
+    """
+    if tau_grid is None:
+        tau_grid = get_tau_grid_rt_only()
+    else:
+        tau_grid = np.asarray(tau_grid, dtype=float)
+
+    mu = float(np.cos(np.deg2rad(float(inc_deg))))
+
+    if omega_list_I is None:
+        omega_list_I = np.round(np.linspace(0.0, 0.9, 10), 1)
+    if omega_list_PF is None:
+        omega_list_PF = np.round(np.linspace(0.0, 0.9, 10), 1)
+
+    omega_list_I = [float(o) for o in omega_list_I]
+    omega_list_PF = [float(o) for o in omega_list_PF]
+
+    if exclude_omega0_in_PF:
+        omega_list_PF = [o for o in omega_list_PF if abs(o) > 1e-15]
+
+    coeff_I = {}
+    for omega in omega_list_I:
+        I_num, Q_num = compute_IQ_rt_on_grid(tau_grid, omega, inc_deg)
+        coeff_I[omega] = fit_eq20_coeffs_I(tau_grid, I_num, mu, tau_switch=tau_switch, floor_rel=floor_I_rel)
+
+    coeff_PF = {}
+    for omega in omega_list_PF:
+        I_num, Q_num = compute_IQ_rt_on_grid(tau_grid, omega, inc_deg)
+        PF_num = compute_PF_from_IQ(I_num, Q_num, floor_I=0.0)
+        coeff_PF[omega] = fit_eq21_coeffs_PF(tau_grid, PF_num, floor_rel=floor_PF_rel, pf_exp=PF_EXP_EQ21)
+
+    return coeff_I, coeff_PF, tau_grid, mu
 
