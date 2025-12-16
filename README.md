@@ -1,6 +1,6 @@
 # emergentintensity
 
-`emergentintensity` is a Python package to compute the emergent Stokes I and Q normalized by \(B_\nu\) from a plane-parallel slab using precomputed radiative-transfer tables with smooth interpolation and thin/thick patches.
+`emergentintensity` is a Python package to compute the emergent Stokes I and Q normalized by the Planck function from a plane-parallel slab using precomputed radiative-transfer tables with smooth interpolation and thin/thick patches.
 
 Main API:
 - `emergent_stokes(tau_max, omega, inc_deg) -> (I_over_Bnu, Q_over_Bnu)`
@@ -12,6 +12,30 @@ Inputs:
 - `inc_deg`: inclination in degrees
 
 The package reads RT tables from `data/` (e.g., `taumax*_I_emergent.inp`, `taumax*_Q_emergent.inp`) and thin-regime Q table `Q_table.inp`.
+
+## Valid parameter ranges
+
+This package is based on precomputed RT tables. Please keep inputs within the tabulated domain.
+
+- Single-scattering albedo `omega`
+  - RT tables are provided only up to `omega = 0.9`.
+  - Do not use `omega > 0.9` (results are not validated).
+
+- Inclination `inc_deg`:
+  - Recommended: avoid exactly `90°`.
+
+- `tau_max` : total vertical extinction optical depth of the slab (extinction = absorption + scattering).
+  - RT tables are provided for `tau_max` in [0.01, 15].
+  - For `tau_max < 0.01`, we apply optically-thin patches:
+    - Stokes I is computed using the analytic thin form
+      `I/B = 1 - exp(-tau_abs / mu)` with `tau_abs = (1 - omega) * tau_max`.
+    - Stokes Q uses a precomputed thin-regime table (from the draft Eq. (10), file `Q_table.inp`)
+      for `tau_max` in [1e-4, 1e-2] (with interpolation in `mu`, `omega`, and `tau_max`).
+      For `tau_max < 1e-4`, Q is extrapolated using an `~tau_max^2` form (Eq. B.4–like),
+      with the coefficient chosen to match the table smoothly at `tau_max = 1e-4`.
+  - For `tau_max > 15`, Stokes I and Q are saturated by clamping to the RT-table values at `tau_max = 15`
+    (i.e., we return the same values as `tau_max = 15`).  
+
 
 ## Installation
 
