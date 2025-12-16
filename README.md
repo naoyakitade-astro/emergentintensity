@@ -89,7 +89,7 @@ Example notebooks in [`notebooks/`](notebooks/):
 - [`plot_fig11-14.ipynb`](notebooks/plot_fig11-14.ipynb): Fig.11-14 reproduction; comparison between fitting formulae and RT results
 
 
-### Requirements
+## Requirements
 - Python >= 3.9
 - NumPy
 - Scipy
