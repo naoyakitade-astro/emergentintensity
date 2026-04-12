@@ -1,6 +1,13 @@
 # emergentintensity
 
-`emergentintensity` is a Python package to compute the emergent Stokes I and Q normalized by B (Planck function) from a plane-parallel slab using precomputed radiative-transfer tables with smooth interpolation and thin/thick patches.
+This repository provides three Python modules for radiative-transfer-table-based calculations and fitting:
+
+## Modules
+
+- `stokes_interpolation.py`: computes emergent Stokes I and Q, and polarization fractions by interpolating precomputed radiative-transfer tables
+- `stokes_i_fitting.py`: fits the emergent Stokes I using fitting functions
+- `pf_fitting.py`: fits the polarization fraction using fitting functions
+
 
 ## Citation
 
@@ -23,43 +30,51 @@ pip install jupyter
 jupyter lab
 ```
 
-## Quick start
+## Examples
+
+### stokes_interpolation.py
 
 ```python
-from emergentintensity import emergent_stokes
+from stokes_interpolation import emergent_stokes
 
-tau_max = 0.1
-omega   = 0.8
-inc_deg = 60.0
-
-I, Q = emergent_stokes(tau_max, omega, inc_deg)
-print("I/B =", I)
-print("Q/B =", Q)
-print("Q/I =", Q/I if I != 0 else 0.0)
+I, Q = emergent_stokes(1.0, 0.5, 45.0)
+print(I, Q)
 ```
 
-## Usage
+### stokes_i_fitting.py
 
-Main API:
-- `emergent_stokes(tau_max, omega, inc_deg) -> (I_over_B, Q_over_B)`
-- Polarization fraction can be computed as `PF = Q/I`.
+```python
+from stokes_i_fitting import fit_and_plot_I
 
-Inputs:
-- `tau_max`: total vertical extinction optical depth
-- `omega`  : single-scattering albedo
-- `inc_deg`: inclination in degrees
+result = fit_and_plot_I(inc=45.0)
+```
 
-The package reads RT tables from `data/` (e.g., `taumax*_I_emergent.inp`, `taumax*_Q_emergent.inp`) and thin-regime Q table `Q_table.inp`.
+### pf_fitting.py
+
+```python
+from pf_fitting import fit_and_plot_PF
+
+result = fit_and_plot_PF(inc=45.0) 
+```
+
+## Data files
+
+The modules read radiative-transfer tables from `data/`, including:
+
+- `StokesI_emergent/`
+- `StokesQ_emergent/`
+- `Q_table.inp`
+
 
 ## Valid parameter ranges
 
-This package is based on precomputed RT tables. Please keep inputs within the tabulated domain.
+### stokes_interpolation.py
 
 - Albedo `omega`
   - RT tables are provided only up to `omega = 0.9`.
   - Do not use `omega > 0.9` (results are not validated).
 
-- Inclination `inc_deg`:
+- Inclination `inc`:
   - use up to 89.0 degree.
 
 - total vertical extinction optical depth `tau_max`:
@@ -72,7 +87,25 @@ This package is based on precomputed RT tables. Please keep inputs within the ta
       For `tau_max < 1e-4`, Q is extrapolated using an `~tau_max^2` form Eq.(B.4),
       with the coefficient chosen to match the table smoothly at `tau_max = 1e-4`.
   - For `tau_max > 15`, Stokes I and Q are saturated by clamping to the RT-table values at `tau_max = 15`
-    (i.e., we return the same values as `tau_max = 15`).  
+    (i.e., we return the same values as `tau_max = 15`).
+
+### stokes_i_fitting.py
+
+- Albedo `omega`: `0.0 < omega < 0.9`  
+  Values with `omega >= 0.9` are not validated.
+
+- Inclination `inc_deg`: `inc_deg <= 80.0` degrees
+
+- Total vertical extinction optical depth `tau_max`: `tau_max >= 0.0`
+
+### pf_fitting.py
+
+- Albedo `omega`: `0.0 < omega < 0.9`  
+  Values with `omega >= 0.9` are not validated.
+
+- Inclination `inc_deg`: `inc_deg <= 80.0` degrees
+
+- Total vertical extinction optical depth `tau_max`: `tau_max >= 0.0`
 
 
 
@@ -80,28 +113,27 @@ This package is based on precomputed RT tables. Please keep inputs within the ta
 
 Example notebooks in [`notebooks/`](notebooks/):
 
-- [`exampleusage.ipynb`](notebooks/exampleusage.ipynb): basic usage
-- [`plot_emergent_intensity.ipynb`](notebooks/plot_emergent_intensity.ipynb): plotting the Stokes I, Q, and polarization fraction
-- [`plot_regimes.ipynb`](notebooks/plot_regimes.ipynb): regime map
-- [`plot_fig3.ipynb`](notebooks/plot_fig3.ipynb): Fig.3 reproduction; omega dependence of I, Q, and polarization fraction
-- [`plot_fig4.ipynb`](notebooks/plot_fig4.ipynb): Fig.4 reproduction; the peak polarization fraction as a function of inclination
-- [`plot_fig9.ipynb`](notebooks/plot_fig9.ipynb): Fig.9 reproduction; comparison with analytic formulae
-- [`plot_fig11-14.ipynb`](notebooks/plot_fig11-14.ipynb): Fig.11-14 reproduction; comparison between fitting formulae and RT results
+- [`stokes_interpolation_example.ipynb`](notebooks/stokes_interpolation_example.ipynb): basic usage of `stokes_interpolation.py`
+- [`pf_fitting_example.ipynb`](notebooks/pf_fitting_example.ipynb): example for `pf_fitting.py`
+- [`stokes_i_fitting_example.ipynb`](notebooks/stokes_i_fitting_example.ipynb): example for `stokes_i_fitting.py`
 
 
 ## Requirements
+
 - Python >= 3.9
 - NumPy
-- Scipy
-- Matplotlib (only for plotting examples/notebooks)
+- SciPy
+- Matplotlib
+- lmfit
 
 
 ## Repository layout
-- `src/emergentintensity.py` : main code
-- `data/` : RT tables (`taumax*_I_emergent.inp`, `taumax*_Q_emergent.inp`) and `Q_table.inp`
-- `notebooks/` : usage & plotting examples
 
-By default, the code searches tables in data/ (repository root).
+- `src/stokes_interpolation.py`
+- `src/pf_fitting.py`
+- `src/stokes_i_fitting.py`
+- `data/`
+- `notebooks/`
 
 
 ## License
