@@ -11,8 +11,8 @@ from scipy.interpolate import interp1d
 # Constants
 # =========================
 EPS = 1e-12
-DEFAULT_INDIR_I = os.path.join("data", "StokesI_emergent")
-DEFAULT_INDIR_Q = os.path.join("data", "StokesQ_emergent")
+DEFAULT_INDIR_I = "StokesI_emergent"
+DEFAULT_INDIR_Q = "StokesQ_emergent"
 
 # =========================
 # Module-level data loaded from .inp files
@@ -114,8 +114,9 @@ def load_IQ_inp(indir_I=DEFAULT_INDIR_I, indir_Q=DEFAULT_INDIR_Q):
 
     Note
     ----
-    omega=0 is excluded from the PF fitting because PF is always zero there,
-    and StokesQ_emergent does not contain omega=0 files.
+    For omega=0, PF and Q are treated as exactly zero. Therefore omega=0 is
+    loaded from Stokes I files when available, even if StokesQ_emergent does
+    not contain the corresponding files.
     """
     global tau_max_values, omega_values, mu_pos_grid, I_surface, Q_surface
     global _loaded_indir_I, _loaded_indir_Q
@@ -131,11 +132,12 @@ def load_IQ_inp(indir_I=DEFAULT_INDIR_I, indir_Q=DEFAULT_INDIR_Q):
     records_I_all = _build_record_map(filelist_I, "Stokes I")
     records_Q = _build_record_map(filelist_Q, "Stokes Q")
 
-    keys_Q = {key for key in records_Q.keys() if not np.isclose(key[0], 0.0)}
-    keys_I = {key for key in records_I_all.keys() if key in keys_Q and not np.isclose(key[0], 0.0)}
+    keys_I_zero = {key for key in records_I_all.keys() if np.isclose(key[0], 0.0)}
+    keys_I_nonzero = {key for key in records_I_all.keys() if not np.isclose(key[0], 0.0)}
+    keys_Q_nonzero = {key for key in records_Q.keys() if not np.isclose(key[0], 0.0)}
 
-    missing_in_Q = sorted(keys_I - keys_Q)
-    missing_in_I = sorted(keys_Q - keys_I)
+    missing_in_Q = sorted(keys_I_nonzero - keys_Q_nonzero)
+    missing_in_I = sorted(keys_Q_nonzero - keys_I_nonzero)
 
     if missing_in_Q or missing_in_I:
         raise ValueError(
@@ -144,8 +146,12 @@ def load_IQ_inp(indir_I=DEFAULT_INDIR_I, indir_Q=DEFAULT_INDIR_Q):
             f"Missing in {indir_I}: {missing_in_I}"
         )
 
-    tau_max_values = np.array(sorted({key[1] for key in keys_I}), dtype=float)
-    omega_values = np.array(sorted({key[0] for key in keys_I}), dtype=float)
+    keys_all = keys_I_zero | keys_I_nonzero
+    if len(keys_all) == 0:
+        raise ValueError("No Stokes I records were found.")
+
+    tau_max_values = np.array(sorted({key[1] for key in keys_all}), dtype=float)
+    omega_values = np.array(sorted({key[0] for key in keys_all}), dtype=float)
 
     n_tau = len(tau_max_values)
     n_omega = len(omega_values)
@@ -158,14 +164,14 @@ def load_IQ_inp(indir_I=DEFAULT_INDIR_I, indir_Q=DEFAULT_INDIR_Q):
     Q_surface = np.empty((n_omega, n_tau), dtype=object)
     filled = np.zeros((n_omega, n_tau), dtype=bool)
 
-    for key in sorted(keys_I):
+    for key in sorted(keys_all):
         rec_I = records_I_all[key]
-        rec_Q = records_Q[key]
+        rec_Q = records_Q.get(key)
 
         i_tau = tau_to_idx[rec_I["tau_max"]]
         i_omega = omega_to_idx[rec_I["omega"]]
 
-        if not np.array_equal(rec_I["mu_pos"], rec_Q["mu_pos"]):
+        if rec_Q is not None and not np.array_equal(rec_I["mu_pos"], rec_Q["mu_pos"]):
             same_len = len(rec_I["mu_pos"]) == len(rec_Q["mu_pos"])
             same_grid = np.allclose(rec_I["mu_pos"], rec_Q["mu_pos"])
             if not (same_len and same_grid):
@@ -186,7 +192,10 @@ def load_IQ_inp(indir_I=DEFAULT_INDIR_I, indir_Q=DEFAULT_INDIR_Q):
                 )
 
         I_surface[i_omega, i_tau] = rec_I["stokes_val"]
-        Q_surface[i_omega, i_tau] = rec_Q["stokes_val"]
+        if rec_Q is None:
+            Q_surface[i_omega, i_tau] = np.zeros_like(rec_I["stokes_val"], dtype=float)
+        else:
+            Q_surface[i_omega, i_tau] = rec_Q["stokes_val"]
         filled[i_omega, i_tau] = True
 
     if not np.all(filled):
@@ -234,6 +243,7 @@ def model_func_PF(tau_max, A_PF, B_PF, PF_conv, tau_PF):
         A_PF * tau_max**B_PF * np.exp(-((tau_max / tau_PF) ** 0.8))
         + PF_conv * (1.0 - np.exp(-((tau_max / tau_PF) ** 0.8)))
     )
+
 
 
 # =========================
@@ -330,31 +340,40 @@ def fit_and_plot_PF(
     PF_conv = np.zeros(len(omega_values))
     tau_PF = np.zeros(len(omega_values))
 
+    omega_nonzero_mask = ~np.isclose(omega_values, 0.0)
+
     for omega_idx in range(len(omega_values)):
         ydata = PF_angle[omega_idx, :]
-        weights = 1.0 / np.maximum(np.abs(ydata), EPS)
+        current_omega = omega_values[omega_idx]
 
-        params = my_model.make_params(A_PF=1.0, B_PF=0.5, PF_conv=1.0, tau_PF=1.0)
+        if np.isclose(current_omega, 0.0):
+            A_PF[omega_idx] = 0.0
+            PF_conv[omega_idx] = 0.0
+            B_PF[omega_idx] = 0.0
+            tau_PF[omega_idx] = 0.0
+        else:
+            weights = 1.0 / np.maximum(np.abs(ydata), EPS)
+            params = my_model.make_params(A_PF=1.0, B_PF=0.5, PF_conv=1.0, tau_PF=1.0)
 
-        results = my_model.fit(
-            ydata,
-            tau_max=tau_max_values,
-            params=params,
-            weights=weights,
-            nan_policy="omit",
-            method="least_squares",
-            fit_kws={"loss": "linear"},
-        )
+            results = my_model.fit(
+                ydata,
+                tau_max=tau_max_values,
+                params=params,
+                weights=weights,
+                nan_policy="omit",
+                method="least_squares",
+                fit_kws={"loss": "linear"},
+            )
 
-        A_PF[omega_idx] = results.best_values["A_PF"]
-        B_PF[omega_idx] = results.best_values["B_PF"]
-        PF_conv[omega_idx] = results.best_values["PF_conv"]
-        tau_PF[omega_idx] = results.best_values["tau_PF"]
+            A_PF[omega_idx] = results.best_values["A_PF"]
+            B_PF[omega_idx] = results.best_values["B_PF"]
+            PF_conv[omega_idx] = results.best_values["PF_conv"]
+            tau_PF[omega_idx] = results.best_values["tau_PF"]
 
     poly_A = np.poly1d(np.polyfit(omega_values, A_PF, degree))
-    poly_B = np.poly1d(np.polyfit(omega_values, B_PF, degree))
+    poly_B = np.poly1d(np.polyfit(omega_values[omega_nonzero_mask], B_PF[omega_nonzero_mask], degree))
     poly_PFconv = np.poly1d(np.polyfit(omega_values, PF_conv, degree))
-    poly_tauPF = np.poly1d(np.polyfit(omega_values, tau_PF, degree))
+    poly_tauPF = np.poly1d(np.polyfit(omega_values[omega_nonzero_mask], tau_PF[omega_nonzero_mask], degree))
 
     A_fit = poly_A(omega_values)
     B_fit = poly_B(omega_values)
@@ -447,10 +466,11 @@ def fit_and_plot_PF(
     ax[0].add_artist(legend1)
     ax[0].legend(h_all, l_all, loc="upper left", fontsize=20, bbox_to_anchor=(1.01, 1))
 
-    X, Y = np.meshgrid(tau_max_values, omega_values)
-    error = np.zeros((len(omega_values), len(tau_max_values)))
+    omega_error_mask = omega_values >= 0.1
+    X, Y = np.meshgrid(tau_max_values, omega_values[omega_error_mask])
+    error = np.zeros((np.count_nonzero(omega_error_mask), len(tau_max_values)))
 
-    for omega_idx in range(len(omega_values)):
+    for error_omega_idx, omega_idx in enumerate(np.where(omega_error_mask)[0]):
         for tau_idx in range(len(tau_max_values)):
             model_val = model_func_PF(
                 tau_max_values[tau_idx],
@@ -460,7 +480,7 @@ def fit_and_plot_PF(
                 tau_PF_fit[omega_idx],
             )
             data_val = PF_angle[omega_idx, tau_idx]
-            error[omega_idx, tau_idx] = np.abs(100.0 * (data_val - model_val) / max(np.abs(data_val), EPS))
+            error[error_omega_idx, tau_idx] = np.abs(100.0 * (data_val - model_val) / max(np.abs(data_val), EPS))
 
     mesh = ax[1].pcolormesh(X, Y, error, shading="auto", cmap="viridis", vmin=0, vmax=5)
     cbar = fig.colorbar(mesh, ax=ax[1])
