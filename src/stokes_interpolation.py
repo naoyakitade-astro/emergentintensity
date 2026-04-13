@@ -738,8 +738,7 @@ def Q_thin_scalar(tau_max, omega, inc_deg):
 
 
 # ============================================================
-# Extra thin-regime Q table from draft Eq. (C12
-)
+# Extra thin-regime Q table from draft Eq. (C12)
 # (file: DATA_DIR/Q_table.inp)
 # ============================================================
 

@@ -11,7 +11,9 @@ from scipy.interpolate import interp1d
 # Constants
 # =========================
 EPS = 1e-12
-DEFAULT_INDIR_I = os.path.join("data", "StokesI_emergent")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+DEFAULT_INDIR_I = os.path.join(PROJECT_ROOT, "data", "StokesI_emergent")
 
 # =========================
 # Module-level data loaded from .inp files
