@@ -1,5 +1,9 @@
-import glob
-import os
+"""Fitting utilities for polarization fraction (PF)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
 
 import lmfit
 import matplotlib.pyplot as plt
@@ -11,21 +15,69 @@ from scipy.interpolate import interp1d
 # Constants
 # =========================
 EPS = 1e-12
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-DEFAULT_INDIR_I = os.path.join(PROJECT_ROOT, "data", "StokesI_emergent")
-DEFAULT_INDIR_Q = os.path.join(PROJECT_ROOT, "data", "StokesQ_emergent")
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+DEFAULT_INDIR_I = PROJECT_ROOT / "data" / "StokesI_emergent"
+DEFAULT_INDIR_Q = PROJECT_ROOT / "data" / "StokesQ_emergent"
 
-# =========================
-# Module-level data loaded from .inp files
-# =========================
-tau_max_values = None
-omega_values = None
-mu_pos_grid = None
-I_surface = None
-Q_surface = None
-_loaded_indir_I = None
-_loaded_indir_Q = None
+MIN_VALID_INC_DEG = 0.0
+MAX_VALID_INC_DEG = 80.0
+MAX_VALID_OMEGA = 0.9
+
+
+@dataclass(frozen=True)
+class PFData:
+    """Container for the Stokes-I/Q tables used in PF fitting."""
+
+    tau_max_values: np.ndarray
+    omega_values: np.ndarray
+    mu_pos_grid: np.ndarray
+    I_surface: np.ndarray
+    Q_surface: np.ndarray
+    indir_I: Path
+    indir_Q: Path
+
+
+def _resolve_angle_deg(inc=None, angle_deg=None, *, default=45.0):
+    """Resolve the public inclination argument."""
+    if inc is None and angle_deg is None:
+        return float(default)
+
+    if angle_deg is None:
+        angle_deg = inc
+    elif inc is not None and not np.isclose(float(inc), float(angle_deg)):
+        raise ValueError("inc and angle_deg were both given but do not match.")
+
+    return float(angle_deg)
+
+
+def _validate_fit_inputs(angle_deg, degree):
+    """Validate public inputs for the fitting workflow."""
+    if not (MIN_VALID_INC_DEG <= float(angle_deg) <= MAX_VALID_INC_DEG):
+        raise ValueError(
+            "inc must satisfy "
+            f"{MIN_VALID_INC_DEG} <= inc <= {MAX_VALID_INC_DEG} degrees."
+        )
+
+    if int(degree) != degree or degree < 0:
+        raise ValueError("degree must be a non-negative integer.")
+
+
+def _validate_evaluation_inputs(omega, tau_max):
+    """Validate user-supplied evaluation inputs."""
+    omega = np.asarray(omega, dtype=float)
+    tau_max = np.asarray(tau_max, dtype=float)
+
+    if np.any((omega <= 0.0) | (omega > MAX_VALID_OMEGA)):
+        raise ValueError(
+            "omega is outside the validated range for this PF fitting formula. "
+            f"Use 0.0 < omega <= {MAX_VALID_OMEGA}."
+        )
+
+    if np.any(tau_max < 0.0):
+        raise ValueError("tau_max must satisfy tau_max >= 0.0.")
+
+    return omega, tau_max
 
 
 # =========================
@@ -36,11 +88,12 @@ def read_single_inp(filepath):
     Read a single .inp file and return
     omega, tau_max, mu_pos, and the Stokes value.
     """
+    filepath = Path(filepath)
     omega = None
     tau_max = None
     n_mu = None
 
-    with open(filepath, "r", encoding="utf-8") as f:
+    with filepath.open("r", encoding="utf-8") as f:
         header_lines = []
         data_lines = []
 
@@ -64,26 +117,27 @@ def read_single_inp(filepath):
         raise ValueError(f"{filepath}: tau_max not found in header")
     if n_mu is None:
         raise ValueError(f"{filepath}: n_mu not found in header")
-    if len(data_lines) == 0:
+    if not data_lines:
         raise ValueError(f"{filepath}: no data rows found")
 
     arr = np.loadtxt(data_lines)
     if arr.ndim == 1:
         arr = arr.reshape(1, 2)
 
-    mu_pos = arr[:, 0]
-    stokes_val = arr[:, 1]
+    mu_pos = np.asarray(arr[:, 0], dtype=float)
+    stokes_val = np.asarray(arr[:, 1], dtype=float)
 
     if len(mu_pos) != n_mu:
         raise ValueError(f"{filepath}: header n_mu and actual row count do not match")
 
-    return omega, tau_max, mu_pos, stokes_val
+    return float(omega), float(tau_max), mu_pos, stokes_val
 
 
 # =========================
 # Helper function to build a record dictionary from .inp files
 # =========================
 def _build_record_map(filelist, label):
+    """Build a dict keyed by (omega, tau_max)."""
     records = {}
 
     for filepath in filelist:
@@ -96,7 +150,7 @@ def _build_record_map(filelist, label):
             )
 
         records[key] = {
-            "filepath": filepath,
+            "filepath": Path(filepath),
             "omega": float(omega),
             "tau_max": float(tau_max),
             "mu_pos": mu_pos,
@@ -107,34 +161,33 @@ def _build_record_map(filelist, label):
 
 
 # =========================
-# Load all I/Q .inp files into module-level arrays
+# Load all I/Q .inp files into an explicit data bundle
 # =========================
 def load_IQ_inp(indir_I=DEFAULT_INDIR_I, indir_Q=DEFAULT_INDIR_Q):
     """
-    Read Stokes I and Stokes Q .inp files and reconstruct
-    tau_max_values, omega_values, mu_pos_grid, I_surface, and Q_surface.
+    Read Stokes-I and Stokes-Q .inp files and reconstruct the fitting arrays.
 
-    Note
-    ----
-    omega=0 is excluded from the PF fitting because PF is always zero there,
-    and StokesQ_emergent does not contain omega=0 files.
+    Notes
+    -----
+    ``omega = 0`` is excluded from the PF fitting because PF is always zero
+    there and ``StokesQ_emergent`` does not contain ``omega = 0`` files.
     """
-    global tau_max_values, omega_values, mu_pos_grid, I_surface, Q_surface
-    global _loaded_indir_I, _loaded_indir_Q
+    indir_I = Path(indir_I)
+    indir_Q = Path(indir_Q)
 
-    filelist_I = sorted(glob.glob(os.path.join(indir_I, "*.inp")))
-    filelist_Q = sorted(glob.glob(os.path.join(indir_Q, "*.inp")))
+    filelist_I = sorted(indir_I.glob("*.inp"))
+    filelist_Q = sorted(indir_Q.glob("*.inp"))
 
-    if len(filelist_I) == 0:
+    if not filelist_I:
         raise FileNotFoundError(f"no inp files found in {indir_I}")
-    if len(filelist_Q) == 0:
+    if not filelist_Q:
         raise FileNotFoundError(f"no inp files found in {indir_Q}")
 
     records_I_all = _build_record_map(filelist_I, "Stokes I")
     records_Q = _build_record_map(filelist_Q, "Stokes Q")
 
-    keys_Q = {key for key in records_Q.keys() if not np.isclose(key[0], 0.0)}
-    keys_I = {key for key in records_I_all.keys() if key in keys_Q and not np.isclose(key[0], 0.0)}
+    keys_Q = {key for key in records_Q if not np.isclose(key[0], 0.0)}
+    keys_I = {key for key in records_I_all if key in keys_Q and not np.isclose(key[0], 0.0)}
 
     missing_in_Q = sorted(keys_I - keys_Q)
     missing_in_I = sorted(keys_Q - keys_I)
@@ -195,21 +248,61 @@ def load_IQ_inp(indir_I=DEFAULT_INDIR_I, indir_Q=DEFAULT_INDIR_Q):
         missing = np.argwhere(~filled)
         raise ValueError(f"Some (omega, tau_max) pairs are missing: {missing}")
 
-    _loaded_indir_I = indir_I
-    _loaded_indir_Q = indir_Q
-    return tau_max_values, omega_values, mu_pos_grid, I_surface, Q_surface
+    return PFData(
+        tau_max_values=tau_max_values,
+        omega_values=omega_values,
+        mu_pos_grid=mu_pos_grid,
+        I_surface=I_surface,
+        Q_surface=Q_surface,
+        indir_I=indir_I,
+        indir_Q=indir_Q,
+    )
+
+
+def _coerce_pf_surface_inputs(data=None, mu_pos_grid=None, I_surface=None, Q_surface=None):
+    """
+    Accept either a ``PFData`` bundle or the raw arrays used in the
+    original public API.
+    """
+    if data is not None:
+        return data.mu_pos_grid, data.I_surface, data.Q_surface
+
+    if mu_pos_grid is None or I_surface is None or Q_surface is None:
+        raise TypeError(
+            "Pass either data=<PFData> or mu_pos_grid, I_surface, and Q_surface."
+        )
+
+    return mu_pos_grid, I_surface, Q_surface
 
 
 # =========================
 # Interpolate PF to a requested angle
 # =========================
-def get_PF_at_angle_fast(angle_deg, mu_pos_grid, I_surface, Q_surface):
-    """Interpolate Stokes I/Q onto the requested viewing angle and return PF=Q/I."""
+def get_PF_at_angle_fast(
+    inc=45.0,
+    mu_pos_grid=None,
+    I_surface=None,
+    Q_surface=None,
+    data=None,
+    angle_deg=None,
+):
+    """
+    Interpolate Stokes I/Q onto the requested viewing angle and return PF=Q/I.
+    """
+    angle_deg = _resolve_angle_deg(inc=inc, angle_deg=angle_deg)
+    _validate_fit_inputs(angle_deg=angle_deg, degree=0)
+    mu_pos_grid, I_surface, Q_surface = _coerce_pf_surface_inputs(
+        data=data,
+        mu_pos_grid=mu_pos_grid,
+        I_surface=I_surface,
+        Q_surface=Q_surface,
+    )
+
     mu = np.cos(np.deg2rad(angle_deg))
 
     n_omega = I_surface.shape[0]
     n_tau = I_surface.shape[1]
-    PF_angle = np.zeros((n_omega, n_tau))
+    pf_angle = np.zeros((n_omega, n_tau))
 
     for omega_idx in range(n_omega):
         for tau_idx in range(n_tau):
@@ -222,15 +315,16 @@ def get_PF_at_angle_fast(angle_deg, mu_pos_grid, I_surface, Q_surface):
 
             I_val = float(I_interp(mu))
             Q_val = float(Q_interp(mu))
-            PF_angle[omega_idx, tau_idx] = Q_val / I_val
+            pf_angle[omega_idx, tau_idx] = Q_val / I_val
 
-    return PF_angle
+    return pf_angle
 
 
 # =========================
 # PF model
 # =========================
 def model_func_PF(tau_max, A_PF, B_PF, PF_conv, tau_PF):
+    """PF fitting formula."""
     tau_max = np.asarray(tau_max)
     return (
         A_PF * tau_max**B_PF * np.exp(-((tau_max / tau_PF) ** 0.8))
@@ -242,6 +336,7 @@ def model_func_PF(tau_max, A_PF, B_PF, PF_conv, tau_PF):
 # Convert a polynomial to a LaTeX string
 # =========================
 def poly_to_latex(poly, var=r"\omega", precision=3):
+    """Convert ``np.poly1d`` to a compact LaTeX-like string."""
     coeffs = np.array(poly.c, dtype=float)
     deg = len(coeffs) - 1
     terms = []
@@ -266,7 +361,7 @@ def poly_to_latex(poly, var=r"\omega", precision=3):
             else:
                 term = f"{abs(c_round):.{precision}g}{var}^{power}"
 
-        if len(terms) == 0:
+        if not terms:
             terms.append(("-" if c_round < 0 else "") + term)
         else:
             terms.append((" - " if c_round < 0 else " + ") + term)
@@ -285,6 +380,7 @@ def fit_and_plot_PF(
     indir_Q=DEFAULT_INDIR_Q,
     savepath=None,
     show=True,
+    data=None,
 ):
     """
     Perform the PF fitting and make the plot.
@@ -292,55 +388,47 @@ def fit_and_plot_PF(
     Parameters
     ----------
     inc : float, optional
-        Inclination angle in degrees. This is the main public argument.
+        Inclination angle in degrees. Use keyword arguments in user-facing
+        examples.
     angle_deg : float or None, optional
-        Alternative name for the inclination angle. If given, it overrides inc.
+        Backward-compatible alias for ``inc``. If given, it overrides ``inc``.
     degree : int, optional
         Polynomial degree for fitting the omega dependence.
-    indir_I : str, optional
-        Directory containing Stokes I .inp files.
-    indir_Q : str, optional
-        Directory containing Stokes Q .inp files.
-    savepath : str or None, optional
+    indir_I, indir_Q : str or Path, optional
+        Directories containing Stokes-I and Stokes-Q .inp files. Ignored when
+        ``data`` is given.
+    savepath : str or Path or None, optional
         Output figure path.
     show : bool, optional
         If True, show the figure.
+    data : PFData or None, optional
+        Explicit data bundle returned by :func:`load_IQ_inp`. Passing this
+        avoids module-level global state and repeated reloading.
     """
-    global tau_max_values, omega_values, mu_pos_grid, I_surface, Q_surface
-    global _loaded_indir_I, _loaded_indir_Q
+    angle_deg = _resolve_angle_deg(inc=inc, angle_deg=angle_deg)
+    _validate_fit_inputs(angle_deg=angle_deg, degree=degree)
 
-    if angle_deg is None:
-        angle_deg = inc
+    if data is None:
+        data = load_IQ_inp(indir_I=indir_I, indir_Q=indir_Q)
 
-    if (
-        tau_max_values is None
-        or omega_values is None
-        or mu_pos_grid is None
-        or I_surface is None
-        or Q_surface is None
-        or _loaded_indir_I != indir_I
-        or _loaded_indir_Q != indir_Q
-    ):
-        load_IQ_inp(indir_I=indir_I, indir_Q=indir_Q)
-
-    PF_angle = get_PF_at_angle_fast(angle_deg, mu_pos_grid, I_surface, Q_surface)
+    pf_angle = get_PF_at_angle_fast(inc=angle_deg, data=data)
 
     my_model = lmfit.Model(model_func_PF)
 
-    A_PF = np.zeros(len(omega_values))
-    B_PF = np.zeros(len(omega_values))
-    PF_conv = np.zeros(len(omega_values))
-    tau_PF = np.zeros(len(omega_values))
+    A_PF = np.zeros(len(data.omega_values))
+    B_PF = np.zeros(len(data.omega_values))
+    PF_conv = np.zeros(len(data.omega_values))
+    tau_PF = np.zeros(len(data.omega_values))
 
-    for omega_idx in range(len(omega_values)):
-        ydata = PF_angle[omega_idx, :]
+    for omega_idx in range(len(data.omega_values)):
+        ydata = pf_angle[omega_idx, :]
         weights = 1.0 / np.maximum(np.abs(ydata), EPS)
 
         params = my_model.make_params(A_PF=1.0, B_PF=0.5, PF_conv=1.0, tau_PF=1.0)
 
         results = my_model.fit(
             ydata,
-            tau_max=tau_max_values,
+            tau_max=data.tau_max_values,
             params=params,
             weights=weights,
             nan_policy="omit",
@@ -353,15 +441,15 @@ def fit_and_plot_PF(
         PF_conv[omega_idx] = results.best_values["PF_conv"]
         tau_PF[omega_idx] = results.best_values["tau_PF"]
 
-    poly_A = np.poly1d(np.polyfit(omega_values, A_PF, degree))
-    poly_B = np.poly1d(np.polyfit(omega_values, B_PF, degree))
-    poly_PFconv = np.poly1d(np.polyfit(omega_values, PF_conv, degree))
-    poly_tauPF = np.poly1d(np.polyfit(omega_values, tau_PF, degree))
+    poly_A = np.poly1d(np.polyfit(data.omega_values, A_PF, degree))
+    poly_B = np.poly1d(np.polyfit(data.omega_values, B_PF, degree))
+    poly_PFconv = np.poly1d(np.polyfit(data.omega_values, PF_conv, degree))
+    poly_tauPF = np.poly1d(np.polyfit(data.omega_values, tau_PF, degree))
 
-    A_fit = poly_A(omega_values)
-    B_fit = poly_B(omega_values)
-    PF_conv_fit = poly_PFconv(omega_values)
-    tau_PF_fit = poly_tauPF(omega_values)
+    A_fit = poly_A(data.omega_values)
+    B_fit = poly_B(data.omega_values)
+    PF_conv_fit = poly_PFconv(data.omega_values)
+    tau_PF_fit = poly_tauPF(data.omega_values)
 
     latex_A = poly_to_latex(poly_A)
     latex_B = poly_to_latex(poly_B)
@@ -401,12 +489,12 @@ def fit_and_plot_PF(
 
     tau_plot = np.arange(0.0, 15.0, 0.01)
 
-    for omega_idx in range(len(omega_values)):
-        current_omega = omega_values[omega_idx]
+    for omega_idx in range(len(data.omega_values)):
+        current_omega = data.omega_values[omega_idx]
 
         ax[0].scatter(
-            tau_max_values,
-            100.0 * PF_angle[omega_idx, :],
+            data.tau_max_values,
+            100.0 * pf_angle[omega_idx, :],
             label=fr"$\omega={current_omega}$",
             s=40,
         )
@@ -449,20 +537,22 @@ def fit_and_plot_PF(
     ax[0].add_artist(legend1)
     ax[0].legend(h_all, l_all, loc="upper left", fontsize=20, bbox_to_anchor=(1.01, 1))
 
-    X, Y = np.meshgrid(tau_max_values, omega_values)
-    error = np.zeros((len(omega_values), len(tau_max_values)))
+    X, Y = np.meshgrid(data.tau_max_values, data.omega_values)
+    error = np.zeros((len(data.omega_values), len(data.tau_max_values)))
 
-    for omega_idx in range(len(omega_values)):
-        for tau_idx in range(len(tau_max_values)):
+    for omega_idx in range(len(data.omega_values)):
+        for tau_idx in range(len(data.tau_max_values)):
             model_val = model_func_PF(
-                tau_max_values[tau_idx],
+                data.tau_max_values[tau_idx],
                 A_fit[omega_idx],
                 B_fit[omega_idx],
                 PF_conv_fit[omega_idx],
                 tau_PF_fit[omega_idx],
             )
-            data_val = PF_angle[omega_idx, tau_idx]
-            error[omega_idx, tau_idx] = np.abs(100.0 * (data_val - model_val) / max(np.abs(data_val), EPS))
+            data_val = pf_angle[omega_idx, tau_idx]
+            error[omega_idx, tau_idx] = np.abs(
+                100.0 * (data_val - model_val) / max(np.abs(data_val), EPS)
+            )
 
     mesh = ax[1].pcolormesh(X, Y, error, shading="auto", cmap="viridis", vmin=0, vmax=5)
     cbar = fig.colorbar(mesh, ax=ax[1])
@@ -472,11 +562,13 @@ def fit_and_plot_PF(
         fig.savefig(savepath, bbox_inches="tight")
     if show:
         plt.show()
+    else:
+        plt.close(fig)
 
     return {
         "angle_deg": angle_deg,
         "degree": degree,
-        "PF_angle": PF_angle,
+        "PF_angle": pf_angle,
         "A_PF": A_PF,
         "B_PF": B_PF,
         "PF_conv": PF_conv,
@@ -486,16 +578,8 @@ def fit_and_plot_PF(
         "poly_PFconv": poly_PFconv,
         "poly_tauPF": poly_tauPF,
         "error": error,
+        "data": data,
     }
-
-
-__all__ = [
-    "fit_and_plot_PF",
-    "load_IQ_inp",
-    "read_single_inp",
-    "get_PF_at_angle_fast",
-    "model_func_PF",
-]
 
 
 # =========================
@@ -508,19 +592,18 @@ def evaluate_PF_from_polynomial(omega, tau_max, poly_A, poly_B, poly_PFconv, pol
     Parameters
     ----------
     omega : float or array-like
-        Single-scattering albedo.
+        Single-scattering albedo. Validated range: 0.0 < omega <= 0.9.
     tau_max : float or array-like
-        Maximum optical depth.
+        Maximum optical depth. Must satisfy tau_max >= 0.0.
     poly_A, poly_B, poly_PFconv, poly_tauPF : np.poly1d
-        Polynomial functions of omega returned by fit_and_plot_PF().
+        Polynomial functions of omega returned by :func:`fit_and_plot_PF`.
 
     Returns
     -------
     float or ndarray
         Evaluated polarization fraction.
     """
-    omega = np.asarray(omega, dtype=float)
-    tau_max = np.asarray(tau_max, dtype=float)
+    omega, tau_max = _validate_evaluation_inputs(omega=omega, tau_max=tau_max)
 
     A_val = poly_A(omega)
     B_val = poly_B(omega)
@@ -536,107 +619,8 @@ def evaluate_PF_from_polynomial(omega, tau_max, poly_A, poly_B, poly_PFconv, pol
 
 def evaluate_PF_from_fit_result(omega, tau_max, fit_result):
     """
-    Evaluate the fitted PF model using the dictionary returned by fit_and_plot_PF().
-
-    Parameters
-    ----------
-    omega : float or array-like
-        Single-scattering albedo.
-    tau_max : float or array-like
-        Maximum optical depth.
-    fit_result : dict
-        Output dictionary returned by fit_and_plot_PF().
-
-    Returns
-    -------
-    float or ndarray
-        Evaluated polarization fraction.
-    """
-    required_keys = ["poly_A", "poly_B", "poly_PFconv", "poly_tauPF"]
-    missing_keys = [key for key in required_keys if key not in fit_result]
-    if missing_keys:
-        raise KeyError(f"fit_result is missing required keys: {missing_keys}")
-
-    return evaluate_PF_from_polynomial(
-        omega=omega,
-        tau_max=tau_max,
-        poly_A=fit_result["poly_A"],
-        poly_B=fit_result["poly_B"],
-        poly_PFconv=fit_result["poly_PFconv"],
-        poly_tauPF=fit_result["poly_tauPF"],
-    )
-
-
-__all__ += [
-    "evaluate_PF_from_polynomial",
-    "evaluate_PF_from_fit_result",
-]
-
-# =========================
-# Validation-aware PF evaluators
-# =========================
-def evaluate_PF_from_polynomial(omega, tau_max, poly_A, poly_B, poly_PFconv, poly_tauPF):
-    """
-    Evaluate the fitted PF model at the requested omega and tau_max.
-
-    Parameters
-    ----------
-    omega : float or array-like
-        Single-scattering albedo. Defined only for 0 <= omega < 1.
-    tau_max : float or array-like
-        Maximum optical depth. Defined only for tau_max >= 0.
-    poly_A, poly_B, poly_PFconv, poly_tauPF : np.poly1d
-        Polynomial functions of omega returned by fit_and_plot_PF().
-
-    Returns
-    -------
-    float or ndarray or None
-        Evaluated polarization fraction.
-        Returns None when the input is outside the defined range.
-    """
-    omega = np.asarray(omega, dtype=float)
-    tau_max = np.asarray(tau_max, dtype=float)
-
-    invalid_omega = np.any((omega < 0.0) | (omega >= 1.0))
-    invalid_tau = np.any(tau_max < 0.0)
-    if invalid_omega or invalid_tau:
-        print(
-            "PF is undefined for the requested input. "
-            "Use 0 <= omega < 1 and tau_max >= 0."
-        )
-        return None
-
-    A_val = poly_A(omega)
-    B_val = poly_B(omega)
-    PF_conv_val = poly_PFconv(omega)
-    tau_PF_val = poly_tauPF(omega)
-
-    pf_val = model_func_PF(tau_max, A_val, B_val, PF_conv_val, tau_PF_val)
-
-    if np.ndim(pf_val) == 0:
-        return float(pf_val)
-    return pf_val
-
-
-
-def evaluate_PF_from_fit_result(omega, tau_max, fit_result):
-    """
-    Evaluate the fitted PF model using the dictionary returned by fit_and_plot_PF().
-
-    Parameters
-    ----------
-    omega : float or array-like
-        Single-scattering albedo. Defined only for 0 <= omega < 1.
-    tau_max : float or array-like
-        Maximum optical depth. Defined only for tau_max >= 0.
-    fit_result : dict
-        Output dictionary returned by fit_and_plot_PF().
-
-    Returns
-    -------
-    float or ndarray or None
-        Evaluated polarization fraction.
-        Returns None when the input is outside the defined range.
+    Evaluate the fitted PF model using the dictionary returned by
+    :func:`fit_and_plot_PF`.
     """
     required_keys = ["poly_A", "poly_B", "poly_PFconv", "poly_tauPF"]
     missing_keys = [key for key in required_keys if key not in fit_result]

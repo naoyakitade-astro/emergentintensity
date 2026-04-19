@@ -8,12 +8,10 @@ This repository provides three Python modules for radiative-transfer-table-based
 - `stokes_i_fitting.py`: fits the emergent Stokes I using fitting functions
 - `pf_fitting.py`: fits the polarization fraction using fitting functions
 
-
 ## Citation
 
 If you use this code or the tables, please cite:
 - Kitade & Kataoka 2026
-
 
 ## Installation
 
@@ -35,11 +33,20 @@ jupyter lab
 ### stokes_interpolation.py
 
 ```python
-from stokes_interpolation import emergent_stokes
+from stokes_interpolation import emergent_stokes, setup_tables
 
-I, Q = emergent_stokes(1.0, 0.5, 45.0)
+context = setup_tables(data_dir="data")
+
+I, Q = emergent_stokes(
+    tau_max=1.0,
+    omega=0.5,
+    inc=45.0,
+    context=context,
+)
 print(I, Q)
 ```
+
+`emergent_stokes()` also accepts `inc_deg=` as a backward-compatible alias for `inc=`.
 
 ### stokes_i_fitting.py
 
@@ -49,12 +56,33 @@ from stokes_i_fitting import fit_and_plot_I
 result = fit_and_plot_I(inc=45.0)
 ```
 
+If you want to reuse already loaded data and avoid hidden global state:
+
+```python
+from stokes_i_fitting import fit_and_plot_I, load_I_only_inp
+
+data = load_I_only_inp("data/StokesI_emergent")
+result = fit_and_plot_I(inc=45.0, data=data)
+```
+
 ### pf_fitting.py
 
 ```python
 from pf_fitting import fit_and_plot_PF
 
-result = fit_and_plot_PF(inc=45.0) 
+result = fit_and_plot_PF(inc=45.0)
+```
+
+If you want to reuse already loaded data and avoid hidden global state:
+
+```python
+from pf_fitting import fit_and_plot_PF, load_IQ_inp
+
+data = load_IQ_inp(
+    indir_I="data/StokesI_emergent",
+    indir_Q="data/StokesQ_emergent",
+)
+result = fit_and_plot_PF(inc=45.0, data=data)
 ```
 
 ## Data files
@@ -65,49 +93,46 @@ The modules read radiative-transfer tables from `data/`, including:
 - `StokesQ_emergent/`
 - `Q_table.inp`
 
-
 ## Valid parameter ranges
+
+Inputs outside the validated user range now raise `ValueError` so that failures are explicit.
 
 ### stokes_interpolation.py
 
 - Albedo `omega`
-  - RT tables are provided only up to `omega = 0.9`.
-  - Do not use `omega > 0.9` (results are not validated).
-
-- Inclination `inc`:
-  - use up to 89.0 degree.
-
-- total vertical extinction optical depth `tau_max`:
-  - RT tables are provided for `tau_max` in [0.01, 15].
+  - validated range: `0.0 <= omega <= 0.9`
+  - `omega > 0.9` raises `ValueError`
+  - For `omega = 0`, the code uses the analytic pure-absorption solution rather than interpolating the RT tables.
+  - For `omega > 0`, the emergent Stokes parameters are obtained from the numerical RT tables, and the interpolation in `omega` is constructed so that the solution connects smoothly from the analytic `omega = 0` limit to the first tabulated numerical solution at `omega = 0.1`.
+- Inclination `inc`
+  - validated range: `0.0 <= inc <= 89.0` degrees
+- Total vertical extinction optical depth `tau_max`
+  - validated range: `tau_max >= 0.0`
+  - RT tables are provided for `tau_max` in `[0.01, 15]`
   - For `tau_max < 0.01`, we apply optically-thin patches:
     - Stokes I is computed using the analytic thin form
-      `I/B = 1 - exp(-tau_abs / mu)` with `tau_abs = (1 - omega) * tau_max`.
-    - Stokes Q uses a precomputed thin-regime table (from Eq. (B.10), file `Q_table.inp`)
-      for `tau_max` in [1e-4, 1e-2] (with interpolation in `mu`, `omega`, and `tau_max`).
-      For `tau_max < 1e-4`, Q is extrapolated using an `~tau_max^2` form Eq.(B.4),
-      with the coefficient chosen to match the table smoothly at `tau_max = 1e-4`.
-  - For `tau_max > 15`, Stokes I and Q are saturated by clamping to the RT-table values at `tau_max = 15`
-    (i.e., we return the same values as `tau_max = 15`).
+      `I/B = 1 - exp(-tau_abs / mu)` with `tau_abs = (1 - omega) * tau_max`
+    - Stokes Q uses a precomputed thin-regime table (file `Q_table.inp`)
+      for `tau_max` in `[1e-4, 1e-2]`
+  - For `tau_max > 15`, Stokes I and Q are saturated by clamping to the RT-table values at `tau_max = 15`, and a `RuntimeWarning` is emitted
 
 ### stokes_i_fitting.py
 
-- Albedo `omega`: `0.0 < omega < 0.9`  
-  Values with `omega >= 0.9` are not validated.
-
-- Inclination `inc_deg`: `inc_deg <= 80.0` degrees
-
-- Total vertical extinction optical depth `tau_max`: `tau_max >= 0.0`
+- Albedo `omega`
+  - validated range for the fitted evaluator: `0.0 <= omega <= 0.9`
+- Inclination `inc`
+  - validated range for fitting: `0.0 <= inc <= 80.0` degrees
+- Total vertical extinction optical depth `tau_max`
+  - validated range: `tau_max >= 0.0`
 
 ### pf_fitting.py
 
-- Albedo `omega`: `0.0 < omega < 0.9`  
-  Values with `omega >= 0.9` are not validated.
-
-- Inclination `inc_deg`: `inc_deg <= 80.0` degrees
-
-- Total vertical extinction optical depth `tau_max`: `tau_max >= 0.0`
-
-
+- Albedo `omega`
+  - validated range for the fitted evaluator: `0.0 < omega <= 0.9`
+- Inclination `inc`
+  - validated range for fitting: `0.0 <= inc <= 80.0` degrees
+- Total vertical extinction optical depth `tau_max`
+  - validated range: `tau_max >= 0.0`
 
 ## Notebooks
 
@@ -117,7 +142,6 @@ Example notebooks in [`notebooks/`](notebooks/):
 - [`pf_fitting_example.ipynb`](notebooks/pf_fitting_example.ipynb): example for `pf_fitting.py`
 - [`stokes_i_fitting_example.ipynb`](notebooks/stokes_i_fitting_example.ipynb): example for `stokes_i_fitting.py`
 
-
 ## Requirements
 
 - Python >= 3.9
@@ -126,15 +150,15 @@ Example notebooks in [`notebooks/`](notebooks/):
 - Matplotlib
 - lmfit
 
-
 ## Repository layout
 
+- `src/__init__.py`
 - `src/stokes_interpolation.py`
 - `src/pf_fitting.py`
 - `src/stokes_i_fitting.py`
 - `data/`
 - `notebooks/`
 
-
 ## License
+
 MIT

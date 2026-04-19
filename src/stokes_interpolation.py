@@ -7,19 +7,25 @@
 #   - smooth connection for Q in [0.01, 0.03] using Eq.C12 -> RT Hermite bridge
 # ============================================================
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
-import re
+import warnings
+
 import numpy as np
 
 
 # ------------------------------------------------------------
-# 0. Global configuration
+# 0. Configuration
 # ------------------------------------------------------------
 MODULE_DIR = Path(__file__).resolve().parent
 
-# Keep the original ``repo_root/data`` default, but resolve paths flexibly so
-# the module works both in the public repository layout and when the files are
-# placed next to this module.
+# This matches the current repository layout:
+#   repo_root/
+#     data/
+#     notebooks/
+#     src/
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Base directory that contains ``Q_table.inp`` and/or the folders
@@ -28,11 +34,81 @@ DATA_DIR = str(REPO_ROOT / "data")
 DEFAULT_I_DIRNAME = "StokesI_emergent"
 DEFAULT_Q_DIRNAME = "StokesQ_emergent"
 
-TABLES = None
-INTERP_TABLES = None
-
-# Use Eq.(10) Q-table in this thin regime (requested: 1e-4 to 1e-2)
+# Use Eq.(C12) Q-table in this thin regime.
 TAU_EQ10_USE_MIN = 1e-4
+
+MIN_VALID_TAU_MAX = 0.0
+MAX_VALID_OMEGA = 0.9
+MIN_VALID_INC_DEG = 0.0
+MAX_VALID_INC_DEG = 89.0
+
+
+@dataclass(frozen=True)
+class StokesInterpolationContext:
+    """
+    Explicit data bundle for the interpolation module.
+
+    Passing this object to the public API avoids module-level mutable state.
+    """
+
+    tables: dict
+    interp_tables: dict
+    q_thin_table: dict | None
+    base_dir: Path | None = None
+    q_table_path: Path | None = None
+
+
+# ============================================================
+# Helpers for validation and explicit context passing
+# ============================================================
+
+def _resolve_inc_deg(inc=None, inc_deg=None):
+    """Resolve the public inclination argument."""
+    if inc is None and inc_deg is None:
+        raise TypeError("Pass inc or inc_deg.")
+
+    if inc_deg is None:
+        inc_deg = inc
+    elif inc is not None and not np.isclose(float(inc), float(inc_deg)):
+        raise ValueError("inc and inc_deg were both given but do not match.")
+
+    return float(inc_deg)
+
+
+def _validate_public_inputs(tau_max, omega, inc_deg):
+    """Validate user-supplied public inputs."""
+    tau_max = float(tau_max)
+    omega = float(omega)
+    inc_deg = float(inc_deg)
+
+    if tau_max < MIN_VALID_TAU_MAX:
+        raise ValueError(f"tau_max must satisfy tau_max >= {MIN_VALID_TAU_MAX}.")
+
+    if not (0.0 <= omega <= MAX_VALID_OMEGA):
+        raise ValueError(
+            "omega is outside the validated range for the interpolation tables. "
+            f"Use 0.0 <= omega <= {MAX_VALID_OMEGA}."
+        )
+
+    if not (MIN_VALID_INC_DEG <= inc_deg <= MAX_VALID_INC_DEG):
+        raise ValueError(
+            "inc must satisfy "
+            f"{MIN_VALID_INC_DEG} <= inc <= {MAX_VALID_INC_DEG} degrees."
+        )
+
+    return tau_max, omega, inc_deg
+
+
+def _require_context(context=None, data_dir=DATA_DIR, idir=None, qdir=None, q_table_path=None):
+    """
+    Return an explicit interpolation context.
+
+    If ``context`` is not given, the tables are loaded on demand. Reusing a
+    previously created context is recommended for repeated evaluations.
+    """
+    if context is not None:
+        return context
+    return setup_tables(data_dir=data_dir, idir=idir, qdir=qdir, q_table_path=q_table_path)
 
 
 # ============================================================
@@ -59,9 +135,9 @@ def _candidate_base_dirs(data_dir=None):
     Candidate base directories that may contain the new-format data.
 
     A valid base directory is expected to contain either
-      - Q_table.inp + StokesI_emergent/ + StokesQ_emergent/
-    or
-      - Q_table.inp + flat files such as I_tau0_1_omega0_1.inp / Q_tau0_1_omega0_1.inp
+
+    - ``Q_table.inp`` + ``StokesI_emergent/`` + ``StokesQ_emergent/``
+    - ``Q_table.inp`` + flat files such as ``I_tau0_1_omega0_1.inp``
     """
     candidates = []
     if data_dir is not None:
@@ -137,10 +213,9 @@ def _resolve_emergent_filelists(data_dir=None, idir=None, qdir=None):
     )
 
 
-
 def _resolve_q_table_path(data_dir=None):
     """
-    Find Q_table.inp.
+    Find ``Q_table.inp``.
     """
     for base_dir in _candidate_base_dirs(data_dir):
         candidate = base_dir / "Q_table.inp"
@@ -152,25 +227,14 @@ def _resolve_q_table_path(data_dir=None):
 def load_emergent_file(path):
     """
     Read one new-format split file such as
-        I_tau0_1_omega0_1.inp
-        Q_tau0_1_omega0_1.inp
 
-    File structure (same parsing style as stokes_i_fitting.py / PF_fitting.py):
-        # content = Stokes I emergent intensity only
-        # omega = ...
-        # tau_max = ...
-        # n_mu = ...
-        # columns: mu I  (or mu Q)
-        <n_mu rows of: mu value>
+    - ``I_tau0_1_omega0_1.inp``
+    - ``Q_tau0_1_omega0_1.inp``
 
-    Returns a dict:
-        {
-          "kind": "I" / "Q",
-          "omega": float,
-          "mu":    np.ndarray (N_mu,),
-          "tau_max": float,
-          "data": np.ndarray (N_mu,),
-        }
+    Returns
+    -------
+    dict
+        ``{"kind", "omega", "mu", "tau_max", "data"}``
     """
     path = Path(path)
 
@@ -248,7 +312,7 @@ def load_emergent_file(path):
 
 def _build_record_map(filelist, expected_kind=None):
     """
-    Build a dict keyed by (tau_max, omega) from split emergent files.
+    Build a dict keyed by ``(tau_max, omega)`` from split emergent files.
     """
     records = {}
     for filepath in filelist:
@@ -267,40 +331,10 @@ def _build_record_map(filelist, expected_kind=None):
     return records
 
 
-def collect_emergent_tables(data_dir=None, idir=None, qdir=None):
+def _collect_emergent_tables_from_filelists(filelist_I, filelist_Q):
     """
-    Scan the new-format emergent files and rebuild the old interpolation-ready
-    table structure:
-
-        {
-          tau1: {"I": rec_I, "Q": rec_Q},
-          tau2: {"I": ...,  "Q": ...},
-          ...
-        }
-
-    where each ``rec_I`` / ``rec_Q`` matches the shape expected by the rest of
-    this module:
-        {
-          "kind": "I" / "Q",
-          "omega": np.ndarray (N_omega,),
-          "mu":    np.ndarray (N_mu,),
-          "tau_max": float,
-          "data": np.ndarray (N_omega, N_mu),
-        }
-
-    Notes
-    -----
-    - ``omega=0`` may be absent from the Q files. In that case a synthetic
-      zero-Q row is added from the corresponding I mu-grid.
-    - Apart from this reconstruction step, the downstream interpolation code is
-      kept unchanged.
+    Rebuild the interpolation-ready table structure from explicit file lists.
     """
-    _, filelist_I, filelist_Q = _resolve_emergent_filelists(
-        data_dir=data_dir,
-        idir=idir,
-        qdir=qdir,
-    )
-
     records_I = _build_record_map(filelist_I, expected_kind="I")
     records_Q = _build_record_map(filelist_Q, expected_kind="Q")
 
@@ -331,7 +365,6 @@ def collect_emergent_tables(data_dir=None, idir=None, qdir=None):
             f"Missing in I: {missing_in_I}"
         )
 
-
     tau_list = sorted({tau for tau, _ in keys_I})
     tables = {}
 
@@ -353,9 +386,7 @@ def collect_emergent_tables(data_dir=None, idir=None, qdir=None):
             if mu_ref is None:
                 mu_ref = np.asarray(rec_I["mu"], dtype=np.float64)
             elif not np.allclose(mu_ref, rec_I["mu"]):
-                raise ValueError(
-                    f"mu grid mismatch across omega files at tau={tau}"
-                )
+                raise ValueError(f"mu grid mismatch across omega files at tau={tau}")
 
             I_rows.append(np.asarray(rec_I["data"], dtype=np.float64))
             Q_rows.append(np.asarray(rec_Q["data"], dtype=np.float64))
@@ -383,6 +414,20 @@ def collect_emergent_tables(data_dir=None, idir=None, qdir=None):
 
     return tables
 
+
+def collect_emergent_tables(data_dir=None, idir=None, qdir=None):
+    """
+    Scan the new-format emergent files and rebuild the old interpolation-ready
+    table structure.
+    """
+    _, filelist_I, filelist_Q = _resolve_emergent_filelists(
+        data_dir=data_dir,
+        idir=idir,
+        qdir=qdir,
+    )
+    return _collect_emergent_tables_from_filelists(filelist_I, filelist_Q)
+
+
 # ============================================================
 # 2. Build interpolation-friendly structure
 # ============================================================
@@ -390,22 +435,14 @@ def collect_emergent_tables(data_dir=None, idir=None, qdir=None):
 def build_interp_tables(tables):
     """
     Convert collected tables into a structure for interpolation.
-
-    Returns:
-        {
-          "tau_grid":   np.ndarray (N_tau,),
-          "omega_grid": np.ndarray (N_omega,),
-          "per_tau": [
-              {
-                "mu_grid": np.ndarray (N_mu_this_tau,),
-                "I":  np.ndarray (N_omega, N_mu_this_tau),
-                "Q":  np.ndarray (N_omega, N_mu_this_tau),
-              },
-              ...
-          ]
-        }
     """
     tau_list = sorted(tables.keys())
+    if len(tau_list) < 3:
+        raise ValueError(
+            "At least three tau grid points are required for the cubic-Hermite "
+            "tau interpolation used by this module."
+        )
+
     tau_grid = np.array(tau_list, dtype=np.float64)
 
     ref = tables[tau_list[0]]["I"]
@@ -417,7 +454,10 @@ def build_interp_tables(tables):
         rec_I = bucket["I"]
         rec_Q = bucket["Q"]
 
-        if not (np.allclose(rec_I["omega"], omega_ref) and np.allclose(rec_Q["omega"], omega_ref)):
+        if not (
+            np.allclose(rec_I["omega"], omega_ref)
+            and np.allclose(rec_Q["omega"], omega_ref)
+        ):
             raise ValueError(f"omega grid mismatch at tau={tau}")
 
         if not np.allclose(rec_I["mu"], rec_Q["mu"]):
@@ -427,7 +467,9 @@ def build_interp_tables(tables):
         Qdata = np.asarray(rec_Q["data"], dtype=np.float32)
 
         if Idata.shape != Qdata.shape:
-            raise ValueError(f"data shape mismatch at tau={tau}: I{Idata.shape}, Q{Qdata.shape}")
+            raise ValueError(
+                f"data shape mismatch at tau={tau}: I{Idata.shape}, Q{Qdata.shape}"
+            )
 
         per_tau.append(
             {
@@ -444,9 +486,67 @@ def build_interp_tables(tables):
     }
 
 
-def setup_tables(data_dir=DATA_DIR, idir=None, qdir=None):
+def load_Q_thin_table(path):
     """
-    Read new-format Stokes I/Q files and build interpolation tables.
+    Load the small-tau Stokes-Q table computed from Eq. (C12).
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Q thin table not found: {path}")
+
+    with path.open() as f:
+        _ = f.readline()  # comment line
+        shape_line = f.readline().strip()
+        n_mu, n_omega, n_tau = map(int, shape_line.split())
+
+        line = f.readline().strip()
+        if not line.startswith("# mu"):
+            raise ValueError(f"{path}: expected '# mu' line, got {line!r}")
+        mu_vals = np.fromstring(f.readline(), sep=" ")
+        if mu_vals.size != n_mu:
+            raise ValueError(f"{path}: mu grid size mismatch")
+
+        line = f.readline().strip()
+        if not line.startswith("# omega"):
+            raise ValueError(f"{path}: expected '# omega' line, got {line!r}")
+        omega_vals = np.fromstring(f.readline(), sep=" ")
+        if omega_vals.size != n_omega:
+            raise ValueError(f"{path}: omega grid size mismatch")
+
+        line = f.readline().strip()
+        if not line.startswith("# tau"):
+            raise ValueError(f"{path}: expected '# tau' line, got {line!r}")
+        tau_vals = np.fromstring(f.readline(), sep=" ")
+        if tau_vals.size != n_tau:
+            raise ValueError(f"{path}: tau grid size mismatch")
+
+        _ = f.readline()
+        _ = f.readline()
+        _ = f.readline()
+
+        data = np.empty((n_mu, n_omega, n_tau), dtype=float)
+        for imu in range(n_mu):
+            for iw in range(n_omega):
+                row = np.fromstring(f.readline(), sep=" ")
+                if row.size != n_tau:
+                    raise ValueError(
+                        f"Unexpected number of tau values at (imu={imu}, iw={iw}): "
+                        f"got {row.size}, expected {n_tau}"
+                    )
+                data[imu, iw, :] = row
+
+    return {
+        "mu_grid": mu_vals,
+        "omega_grid": omega_vals,
+        "tau_grid": tau_vals,
+        "data": data,
+    }
+
+
+def setup_tables(data_dir=DATA_DIR, idir=None, qdir=None, q_table_path=None):
+    """
+    Read new-format Stokes-I/Q files and build an explicit interpolation
+    context.
 
     Parameters
     ----------
@@ -457,11 +557,38 @@ def setup_tables(data_dir=DATA_DIR, idir=None, qdir=None):
     idir, qdir : str or Path, optional
         Explicit I/Q directories. When given, these override automatic path
         discovery.
+    q_table_path : str or Path or None, optional
+        Explicit path to ``Q_table.inp``. When omitted, the path is resolved
+        automatically.
     """
-    global TABLES, INTERP_TABLES
-    TABLES = collect_emergent_tables(data_dir=data_dir, idir=idir, qdir=qdir)
-    INTERP_TABLES = build_interp_tables(TABLES)
-    return TABLES, INTERP_TABLES
+    base_dir, filelist_I, filelist_Q = _resolve_emergent_filelists(
+        data_dir=data_dir,
+        idir=idir,
+        qdir=qdir,
+    )
+    tables = _collect_emergent_tables_from_filelists(filelist_I, filelist_Q)
+    interp_tables = build_interp_tables(tables)
+
+    if q_table_path is not None:
+        q_table_path = Path(q_table_path)
+    else:
+        search_root = data_dir if data_dir is not None else base_dir
+        try:
+            q_table_path = _resolve_q_table_path(search_root)
+        except FileNotFoundError:
+            q_table_path = None
+
+    q_thin_table = None
+    if q_table_path is not None:
+        q_thin_table = load_Q_thin_table(q_table_path)
+
+    return StokesInterpolationContext(
+        tables=tables,
+        interp_tables=interp_tables,
+        q_thin_table=q_thin_table,
+        base_dir=Path(base_dir) if base_dir is not None else None,
+        q_table_path=Path(q_table_path) if q_table_path is not None else None,
+    )
 
 
 # ============================================================
@@ -471,7 +598,7 @@ def setup_tables(data_dir=DATA_DIR, idir=None, qdir=None):
 def _interp_along_mu(mu, mu_grid, data_omega_mu):
     """
     Linear interpolation along mu for each omega.
-    Returns shape (N_omega,)
+    Returns shape ``(N_omega,)``.
     """
     mu_grid = np.asarray(mu_grid)
     data = np.asarray(data_omega_mu)
@@ -517,10 +644,10 @@ def _interp1d_omega(omega, omega_grid, values):
 
 def _interp2d(omega, mu, omega_grid, mu_grid, data_omega_mu):
     """
-    2D interpolation in (omega, mu) using linear interpolation in both directions.
-    Returns scalar.
+    2D interpolation in ``(omega, mu)`` using linear interpolation in both
+    directions.
     """
-    vals_vs_omega = _interp_along_mu(mu, mu_grid, data_omega_mu)  # shape (N_omega,)
+    vals_vs_omega = _interp_along_mu(mu, mu_grid, data_omega_mu)
     return _interp1d_omega(omega, omega_grid, vals_vs_omega)
 
 
@@ -528,14 +655,11 @@ def _interp2d(omega, mu, omega_grid, mu_grid, data_omega_mu):
 # 4. Smooth interpolation along tau (cubic Hermite)
 # ============================================================
 
-def interp_stokes_scalar_smooth(tau_max, omega, mu, kind="I"):
+def interp_stokes_scalar_smooth(tau_max, omega, mu, context):
     """
     Low-level interpolator:
-      (tau_max, omega, mu) -> kind ("I" or "Q")
+      ``(tau_max, omega, mu) -> kind ("I" or "Q")``
     """
-    if INTERP_TABLES is None:
-        raise RuntimeError("INTERP_TABLES is None. Call setup_tables() first.")
-
     tau_max = float(tau_max)
     omega = float(omega)
     mu = float(mu)
@@ -543,16 +667,14 @@ def interp_stokes_scalar_smooth(tau_max, omega, mu, kind="I"):
     # almost pure absorption
     if abs(omega) < 1e-6:
         mu_eff = max(mu, 1e-3)
-        if kind == "I":
-            return float(1.0 - np.exp(-tau_max / mu_eff))
-        elif kind == "Q":
-            return 0.0
-        else:
-            raise ValueError(f"unknown kind: {kind}")
+        return {
+            "I": float(1.0 - np.exp(-tau_max / mu_eff)),
+            "Q": 0.0,
+        }
 
-    tau_grid = INTERP_TABLES["tau_grid"]
-    omega_grid = INTERP_TABLES["omega_grid"]
-    per_tau = INTERP_TABLES["per_tau"]
+    tau_grid = context.interp_tables["tau_grid"]
+    omega_grid = context.interp_tables["omega_grid"]
+    per_tau = context.interp_tables["per_tau"]
 
     tau_min = float(tau_grid[0])
     tau_max_grid = float(tau_grid[-1])
@@ -562,6 +684,9 @@ def interp_stokes_scalar_smooth(tau_max, omega, mu, kind="I"):
     idx_hi = int(np.searchsorted(tau_grid, tau_c, side="right"))
     idx_hi = max(1, min(idx_hi, N - 1))
     idx_lo = idx_hi - 1
+
+    def _value_for_kind(bucket, kind):
+        return _interp2d(omega, mu, omega_grid, bucket["mu_grid"], bucket[kind])
 
     # Left edge interval
     if idx_lo == 0:
@@ -574,24 +699,28 @@ def interp_stokes_scalar_smooth(tau_max, omega, mu, kind="I"):
         rec1 = per_tau[k1]
         rec2 = per_tau[k2]
 
-        y0 = _interp2d(omega, mu, omega_grid, rec0["mu_grid"], rec0[kind])
-        y1 = _interp2d(omega, mu, omega_grid, rec1["mu_grid"], rec1[kind])
-        y2 = _interp2d(omega, mu, omega_grid, rec2["mu_grid"], rec2[kind])
+        out = {}
+        for kind in ("I", "Q"):
+            y0 = _value_for_kind(rec0, kind)
+            y1 = _value_for_kind(rec1, kind)
+            y2 = _value_for_kind(rec2, kind)
 
-        d01 = (y1 - y0) / (tau1 - tau0)
-        d12 = (y2 - y1) / (tau2 - tau1)
+            d01 = (y1 - y0) / (tau1 - tau0)
+            d12 = (y2 - y1) / (tau2 - tau1)
 
-        m0 = d01
-        m1 = 0.5 * (d01 + d12)
+            m0 = d01
+            m1 = 0.5 * (d01 + d12)
 
-        s = (tau_c - tau0) / (tau1 - tau0)
-        h00 =  2.0*s**3 - 3.0*s**2 + 1.0
-        h10 =        s**3 - 2.0*s**2 + s
-        h01 = -2.0*s**3 + 3.0*s**2
-        h11 =        s**3 -       s**2
-        dt = tau1 - tau0
+            s = (tau_c - tau0) / (tau1 - tau0)
+            h00 = 2.0 * s**3 - 3.0 * s**2 + 1.0
+            h10 = s**3 - 2.0 * s**2 + s
+            h01 = -2.0 * s**3 + 3.0 * s**2
+            h11 = s**3 - s**2
+            dt = tau1 - tau0
 
-        return float(h00*y0 + h10*dt*m0 + h01*y1 + h11*dt*m1)
+            out[kind] = float(h00 * y0 + h10 * dt * m0 + h01 * y1 + h11 * dt * m1)
+
+        return out
 
     # Right edge interval
     if idx_hi == N - 1:
@@ -604,24 +733,28 @@ def interp_stokes_scalar_smooth(tau_max, omega, mu, kind="I"):
         rec1 = per_tau[k1]
         rec2 = per_tau[k2]
 
-        y0 = _interp2d(omega, mu, omega_grid, rec0["mu_grid"], rec0[kind])
-        y1 = _interp2d(omega, mu, omega_grid, rec1["mu_grid"], rec1[kind])
-        y2 = _interp2d(omega, mu, omega_grid, rec2["mu_grid"], rec2[kind])
+        out = {}
+        for kind in ("I", "Q"):
+            y0 = _value_for_kind(rec0, kind)
+            y1 = _value_for_kind(rec1, kind)
+            y2 = _value_for_kind(rec2, kind)
 
-        d01 = (y1 - y0) / (tau1 - tau0)
-        d12 = (y2 - y1) / (tau2 - tau1)
+            d01 = (y1 - y0) / (tau1 - tau0)
+            d12 = (y2 - y1) / (tau2 - tau1)
 
-        m1 = 0.5 * (d01 + d12)
-        m2 = d12
+            m1 = 0.5 * (d01 + d12)
+            m2 = d12
 
-        s = (tau_c - tau1) / (tau2 - tau1)
-        h00 =  2.0*s**3 - 3.0*s**2 + 1.0
-        h10 =        s**3 - 2.0*s**2 + s
-        h01 = -2.0*s**3 + 3.0*s**2
-        h11 =        s**3 -       s**2
-        dt = tau2 - tau1
+            s = (tau_c - tau1) / (tau2 - tau1)
+            h00 = 2.0 * s**3 - 3.0 * s**2 + 1.0
+            h10 = s**3 - 2.0 * s**2 + s
+            h01 = -2.0 * s**3 + 3.0 * s**2
+            h11 = s**3 - s**2
+            dt = tau2 - tau1
 
-        return float(h00*y1 + h10*dt*m1 + h01*y2 + h11*dt*m2)
+            out[kind] = float(h00 * y1 + h10 * dt * m1 + h01 * y2 + h11 * dt * m2)
+
+        return out
 
     # Interior intervals
     k0 = idx_lo - 1
@@ -639,45 +772,67 @@ def interp_stokes_scalar_smooth(tau_max, omega, mu, kind="I"):
     rec2 = per_tau[k2]
     rec3 = per_tau[k3]
 
-    y0 = _interp2d(omega, mu, omega_grid, rec0["mu_grid"], rec0[kind])
-    y1 = _interp2d(omega, mu, omega_grid, rec1["mu_grid"], rec1[kind])
-    y2 = _interp2d(omega, mu, omega_grid, rec2["mu_grid"], rec2[kind])
-    y3 = _interp2d(omega, mu, omega_grid, rec3["mu_grid"], rec3[kind])
+    out = {}
+    for kind in ("I", "Q"):
+        y0 = _value_for_kind(rec0, kind)
+        y1 = _value_for_kind(rec1, kind)
+        y2 = _value_for_kind(rec2, kind)
+        y3 = _value_for_kind(rec3, kind)
 
-    d10 = (y1 - y0) / (tau1 - tau0)
-    d21 = (y2 - y1) / (tau2 - tau1)
-    d32 = (y3 - y2) / (tau3 - tau2)
+        d10 = (y1 - y0) / (tau1 - tau0)
+        d21 = (y2 - y1) / (tau2 - tau1)
+        d32 = (y3 - y2) / (tau3 - tau2)
 
-    m1 = 0.5 * (d21 + d10)
-    m2 = 0.5 * (d32 + d21)
+        m1 = 0.5 * (d21 + d10)
+        m2 = 0.5 * (d32 + d21)
 
-    s = (tau_c - tau1) / (tau2 - tau1)
-    h00 =  2.0*s**3 - 3.0*s**2 + 1.0
-    h10 =        s**3 - 2.0*s**2 + s
-    h01 = -2.0*s**3 + 3.0*s**2
-    h11 =        s**3 -       s**2
-    dt = tau2 - tau1
+        s = (tau_c - tau1) / (tau2 - tau1)
+        h00 = 2.0 * s**3 - 3.0 * s**2 + 1.0
+        h10 = s**3 - 2.0 * s**2 + s
+        h01 = -2.0 * s**3 + 3.0 * s**2
+        h11 = s**3 - s**2
+        dt = tau2 - tau1
 
-    return float(h00*y1 + h10*dt*m1 + h01*y2 + h11*dt*m2)
+        out[kind] = float(h00 * y1 + h10 * dt * m1 + h01 * y2 + h11 * dt * m2)
+
+    return out
 
 
 # ============================================================
 # 5. Public pure-interpolation API (no thin/thick patches)
 # ============================================================
 
-def interpolate_stokes(tau_max, omega, inc_deg):
+def interpolate_stokes(
+    tau_max,
+    omega,
+    inc=None,
+    *,
+    inc_deg=None,
+    context=None,
+    data_dir=DATA_DIR,
+    idir=None,
+    qdir=None,
+    q_table_path=None,
+):
     """
     Pure interpolation from RT tables:
-        (tau_max, omega, inc_deg [deg]) -> (I, Q)
+        ``(tau_max, omega, inc [deg]) -> (I, Q)``
 
     No optically thin / thick patches are applied.
     """
-    inc_rad = np.deg2rad(float(inc_deg))
-    mu = float(np.cos(inc_rad))
+    inc_deg = _resolve_inc_deg(inc=inc, inc_deg=inc_deg)
+    tau_max, omega, inc_deg = _validate_public_inputs(tau_max=tau_max, omega=omega, inc_deg=inc_deg)
+    context = _require_context(
+        context=context,
+        data_dir=data_dir,
+        idir=idir,
+        qdir=qdir,
+        q_table_path=q_table_path,
+    )
 
-    I = interp_stokes_scalar_smooth(tau_max, omega, mu, kind="I")
-    Q = interp_stokes_scalar_smooth(tau_max, omega, mu, kind="Q")
-    return float(I), float(Q)
+    mu = float(np.cos(np.deg2rad(inc_deg)))
+    values = interp_stokes_scalar_smooth(tau_max, omega, mu, context=context)
+    return float(values["I"]), float(values["Q"])
 
 
 # ============================================================
@@ -703,15 +858,10 @@ def analytic_thin_I_scalar(tau_max, omega, inc_deg):
     return float(1.0 - np.exp(-tau_los))
 
 
-def Q_thin_scalar(tau_max, omega, inc_deg):
+def Q_thin_scalar(tau_max, omega, inc_deg, context):
     """
-    Optically thin fallback approximation for Stokes Q:
-        Q_thin ∝ (1 - mu^2)/mu * omega*(1-omega) * tau_max^2
-    The proportionality constant is matched to RT at tau_ref = tau_min_table.
+    Optically thin fallback approximation for Stokes Q.
     """
-    if INTERP_TABLES is None:
-        raise RuntimeError("INTERP_TABLES is None. Call setup_tables() first.")
-
     tau_max = float(tau_max)
     omega = float(omega)
     inc_deg = float(inc_deg)
@@ -719,111 +869,31 @@ def Q_thin_scalar(tau_max, omega, inc_deg):
     if tau_max <= 0.0 or omega <= 0.0 or omega >= 1.0:
         return 0.0
 
-    tau_grid = INTERP_TABLES["tau_grid"]
+    tau_grid = context.interp_tables["tau_grid"]
     tau_ref = float(tau_grid[0])
 
     mu = float(np.cos(np.deg2rad(inc_deg)))
     mu = float(np.clip(mu, 1e-10, 1.0))
 
-    _, Q_ref = interpolate_stokes(tau_ref, omega, inc_deg)
+    _, Q_ref = interpolate_stokes(tau_ref, omega, inc=inc_deg, context=context)
 
     base_ref = ((1.0 - mu**2) / mu) * omega * (1.0 - omega) * (tau_ref**2)
     eps = 1e-30
     if abs(base_ref) < eps:
-        return float(Q_ref * (tau_max / tau_ref)**2)
+        return float(Q_ref * (tau_max / tau_ref) ** 2)
 
     c_Q = Q_ref / base_ref
     base_t = ((1.0 - mu**2) / mu) * omega * (1.0 - omega) * (tau_max**2)
     return float(c_Q * base_t)
 
 
-# ============================================================
-# Extra thin-regime Q table from draft Eq. (C12)
-# (file: DATA_DIR/Q_table.inp)
-# ============================================================
-
-Q_THIN_TABLE = None  # will be set by load_Q_thin_table()
-
-
-def load_Q_thin_table(path):
+def Q_eqC12_table_scalar(tau_max, omega, inc_deg, context):
     """
-    Load the small-tau Stokes Q table computed from draft Eq. (C12).
-
-    File format (Q_table.inp):
-        # Q table shape: n_mu n_omega n_tau
-        n_mu n_omega n_tau
-        # mu
-        <n_mu values>
-        # omega
-        <n_omega values>
-        # tau
-        <n_tau values>
-        # data[mu_index, omega_index, tau_index]
-        <n_mu * n_omega lines of Q/B_nu>
+    ``Q/B_nu`` from the small-tau table computed using Eq. (C12).
+    Trilinear interpolation in ``(mu, omega, tau)``.
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Q thin table not found: {path}")
-
-    with path.open() as f:
-        _ = f.readline()  # comment line
-        shape_line = f.readline().strip()
-        n_mu, n_omega, n_tau = map(int, shape_line.split())
-
-        line = f.readline().strip()
-        assert line.startswith("# mu")
-        mu_vals = np.fromstring(f.readline(), sep=" ")
-        assert mu_vals.size == n_mu
-
-        line = f.readline().strip()
-        assert line.startswith("# omega")
-        omega_vals = np.fromstring(f.readline(), sep=" ")
-        assert omega_vals.size == n_omega
-
-        line = f.readline().strip()
-        assert line.startswith("# tau")
-        tau_vals = np.fromstring(f.readline(), sep=" ")
-        assert tau_vals.size == n_tau
-
-        _ = f.readline()
-        _ = f.readline()
-        _ = f.readline()
-
-        data = np.empty((n_mu, n_omega, n_tau), dtype=float)
-        for imu in range(n_mu):
-            for iw in range(n_omega):
-                row = np.fromstring(f.readline(), sep=" ")
-                if row.size != n_tau:
-                    raise ValueError(
-                        f"Unexpected number of tau values at (imu={imu}, iw={iw}): "
-                        f"got {row.size}, expected {n_tau}"
-                    )
-                data[imu, iw, :] = row
-
-    return {
-        "mu_grid": mu_vals,
-        "omega_grid": omega_vals,
-        "tau_grid": tau_vals,
-        "data": data,
-    }
-
-
-# load the table once (from the resolved base directory)
-try:
-    _Q_THIN_TABLE_PATH = _resolve_q_table_path(DATA_DIR)
-    Q_THIN_TABLE = load_Q_thin_table(_Q_THIN_TABLE_PATH)
-    # print(f"Loaded Q_THIN_TABLE from {_Q_THIN_TABLE_PATH}")
-except FileNotFoundError:
-    print("Q_table.inp not found; Q_THIN_TABLE will remain None.")
-
-
-def Q_eqC12_table_scalar(tau_max, omega, inc_deg):
-    """
-    Q/B_nu from the small-tau table computed using draft Eq. (C12).
-    Trilinear interpolation in (mu, omega, tau).
-    """
-    if Q_THIN_TABLE is None:
-        raise RuntimeError("Q_THIN_TABLE is None. Call load_Q_thin_table() first.")
+    if context.q_thin_table is None:
+        raise RuntimeError("Q thin table is unavailable in the supplied context.")
 
     tau_max = float(tau_max)
     omega = float(omega)
@@ -832,10 +902,10 @@ def Q_eqC12_table_scalar(tau_max, omega, inc_deg):
     mu = float(np.cos(np.deg2rad(inc_deg)))
     mu = float(np.clip(mu, 0.0, 1.0))
 
-    mu_grid = Q_THIN_TABLE["mu_grid"]
-    omega_grid = Q_THIN_TABLE["omega_grid"]
-    tau_grid = Q_THIN_TABLE["tau_grid"]
-    data = Q_THIN_TABLE["data"]  # (n_mu, n_omega, n_tau)
+    mu_grid = context.q_thin_table["mu_grid"]
+    omega_grid = context.q_thin_table["omega_grid"]
+    tau_grid = context.q_thin_table["tau_grid"]
+    data = context.q_thin_table["data"]  # (n_mu, n_omega, n_tau)
 
     tau_min_thin = float(tau_grid[0])
     tau_max_thin = float(tau_grid[-1])
@@ -910,17 +980,12 @@ def Q_eqC12_table_scalar(tau_max, omega, inc_deg):
     return float(C)
 
 
-def Q_C8_scalar(tau_max, omega, inc_deg):
+def Q_C8_scalar(tau_max, omega, inc_deg, context):
     """
-    Extremely thin limit for Stokes Q using Eq. (C8)-like form:
-
-        Q/B_nu ∝ (1 - mu^2)/mu * omega * (1 - omega) * tau_max^2
-
-    The proportionality constant c_q is determined to match Eq.(C12) table
-    at the smallest tau in Q_THIN_TABLE.
+    Extremely thin limit for Stokes Q using an Eq. (C8)-like form.
     """
-    if Q_THIN_TABLE is None:
-        return Q_thin_scalar(tau_max, omega, inc_deg)
+    if context.q_thin_table is None:
+        return Q_thin_scalar(tau_max, omega, inc_deg, context=context)
 
     tau_max = float(tau_max)
     omega = float(omega)
@@ -929,18 +994,18 @@ def Q_C8_scalar(tau_max, omega, inc_deg):
     if tau_max <= 0.0 or omega <= 0.0 or omega >= 1.0:
         return 0.0
 
-    tau_grid_thin = Q_THIN_TABLE["tau_grid"]
+    tau_grid_thin = context.q_thin_table["tau_grid"]
     tau_ref = float(tau_grid_thin[0])
 
     mu = float(np.cos(np.deg2rad(inc_deg)))
     mu = float(np.clip(mu, 1e-10, 1.0))
 
-    Q_ref = Q_eqC12_table_scalar(tau_ref, omega, inc_deg)
+    Q_ref = Q_eqC12_table_scalar(tau_ref, omega, inc_deg, context=context)
 
     base_ref = ((1.0 - mu**2) / mu) * omega * (1.0 - omega) * (tau_ref**2)
     eps = 1e-30
     if abs(base_ref) < eps:
-        return float(Q_ref * (tau_max / tau_ref)**2)
+        return float(Q_ref * (tau_max / tau_ref) ** 2)
 
     c_q = Q_ref / base_ref
     base_t = ((1.0 - mu**2) / mu) * omega * (1.0 - omega) * (tau_max**2)
@@ -949,164 +1014,164 @@ def Q_C8_scalar(tau_max, omega, inc_deg):
 
 def _deriv_at_x1_quadratic(x0, x1, x2, y0, y1, y2):
     """
-    derivative at x1 of quadratic through (x0,y0),(x1,y1),(x2,y2)
+    Derivative at x1 of the quadratic through (x0,y0),(x1,y1),(x2,y2).
     """
     return (
-        y0*(x1-x2)/((x0-x1)*(x0-x2))
-        + y1*(2*x1-x0-x2)/((x1-x0)*(x1-x2))
-        + y2*(x1-x0)/((x2-x0)*(x2-x1))
+        y0 * (x1 - x2) / ((x0 - x1) * (x0 - x2))
+        + y1 * (2 * x1 - x0 - x2) / ((x1 - x0) * (x1 - x2))
+        + y2 * (x1 - x0) / ((x2 - x0) * (x2 - x1))
     )
 
 
-def Q_bridge_small_tau(tau_max, omega, inc_deg):
+def Q_bridge_small_tau(tau_max, omega, inc_deg, context):
     """
-    Smoothly connect Q from Eq.(C12) thin table to RT tables
+    Smoothly connect Q from the Eq. (C12) thin table to RT tables
     in the first RT interval [tau0, tau1] using cubic Hermite.
-
-    This requires Q_THIN_TABLE (Eq10).
-
-    IMPORTANT (requested behavior):
-      - use Eq.(C12) table in tau range [TAU_EQ10_USE_MIN, tau0(=tau_min_table)]
-      - bridge in [tau0, tau1] with Q0 evaluated at tau0 (NOT at thin-table last point)
-      - compute slope m0 from Eq.(C12) using the point just below tau0
     """
-    if (INTERP_TABLES is None) or (Q_THIN_TABLE is None):
-        raise RuntimeError("Both INTERP_TABLES and Q_THIN_TABLE are required.")
+    if context.q_thin_table is None:
+        raise RuntimeError("Q thin table is unavailable in the supplied context.")
 
     tau_max = float(tau_max)
     omega = float(omega)
     inc_deg = float(inc_deg)
 
-    tau_grid = INTERP_TABLES["tau_grid"]
-    tau0 = float(tau_grid[0])  # e.g. 0.01
-    tau1 = float(tau_grid[1])  # e.g. 0.03
-    tau2 = float(tau_grid[2])  # e.g. 0.05
+    tau_grid = context.interp_tables["tau_grid"]
+    tau0 = float(tau_grid[0])
+    tau1 = float(tau_grid[1])
+    tau2 = float(tau_grid[2])
 
     if not (tau0 <= tau_max <= tau1):
         raise ValueError("Q_bridge_small_tau is only valid for tau in [tau0, tau1].")
 
-    # ---- Left endpoint from Eq.(C12) side: value at tau0 ----
-    Q0 = float(Q_eqC12_table_scalar(tau0, omega, inc_deg))
+    # Left endpoint from Eq.(C12) side: value at tau0
+    Q0 = float(Q_eqC12_table_scalar(tau0, omega, inc_deg, context=context))
 
-    # ---- Left slope m0 from Eq.(C12): use tau just below tau0 (backward diff) ----
-    tg = np.asarray(Q_THIN_TABLE["tau_grid"], dtype=float)
-    k = int(np.searchsorted(tg, tau0, side="right") - 1)  # tg[k] <= tau0
+    # Left slope m0 from Eq.(C12): use tau just below tau0 (backward diff)
+    tg = np.asarray(context.q_thin_table["tau_grid"], dtype=float)
+    k = int(np.searchsorted(tg, tau0, side="right") - 1)
 
     if k <= 0:
-        # If no previous point exists, use first two points
         tA = float(tg[0])
         tB = float(tg[1])
-        QA = float(Q_eqC12_table_scalar(tA, omega, inc_deg))
-        QB = float(Q_eqC12_table_scalar(tB, omega, inc_deg))
+        QA = float(Q_eqC12_table_scalar(tA, omega, inc_deg, context=context))
+        QB = float(Q_eqC12_table_scalar(tB, omega, inc_deg, context=context))
         m0 = (QB - QA) / (tB - tA)
     else:
-        t_prev = float(tg[k-1])
-        Q_prev = float(Q_eqC12_table_scalar(t_prev, omega, inc_deg))
+        t_prev = float(tg[k - 1])
+        Q_prev = float(Q_eqC12_table_scalar(t_prev, omega, inc_deg, context=context))
         m0 = (Q0 - Q_prev) / (tau0 - t_prev)
 
-    # ---- Right endpoint from RT side ----
-    _, Q1 = interpolate_stokes(tau1, omega, inc_deg)
+    # Right endpoint from RT side
+    _, Q1 = interpolate_stokes(tau1, omega, inc=inc_deg, context=context)
 
     # RT-side derivative at tau1 (quadratic fit using tau0,tau1,tau2)
-    _, Q0_rt = interpolate_stokes(tau0, omega, inc_deg)
-    _, Q2_rt = interpolate_stokes(tau2, omega, inc_deg)
+    _, Q0_rt = interpolate_stokes(tau0, omega, inc=inc_deg, context=context)
+    _, Q2_rt = interpolate_stokes(tau2, omega, inc=inc_deg, context=context)
     m1 = _deriv_at_x1_quadratic(tau0, tau1, tau2, Q0_rt, Q1, Q2_rt)
 
-    # ---- Hermite in [tau0, tau1] ----
+    # Hermite in [tau0, tau1]
     s = (tau_max - tau0) / (tau1 - tau0)
-    h00 =  2.0*s**3 - 3.0*s**2 + 1.0
-    h10 =        s**3 - 2.0*s**2 + s
-    h01 = -2.0*s**3 + 3.0*s**2
-    h11 =        s**3 -       s**2
+    h00 = 2.0 * s**3 - 3.0 * s**2 + 1.0
+    h10 = s**3 - 2.0 * s**2 + s
+    h01 = -2.0 * s**3 + 3.0 * s**2
+    h11 = s**3 - s**2
     dt = tau1 - tau0
 
-    Q_bridge = h00*Q0 + h10*dt*m0 + h01*Q1 + h11*dt*m1
+    Q_bridge = h00 * Q0 + h10 * dt * m0 + h01 * Q1 + h11 * dt * m1
     return float(Q_bridge)
 
 
-def Q_bridge_tau0_tau1_fallback(tau_max, omega, inc_deg):
+def Q_bridge_tau0_tau1_fallback(tau_max, omega, inc_deg, context):
     """
-    Fallback bridge when Q_THIN_TABLE is None.
-    Smoothly connect thin model (Q_thin_scalar) to RT in [tau0, tau1].
+    Fallback bridge when the thin Q table is unavailable.
     """
-    if INTERP_TABLES is None:
-        raise RuntimeError("INTERP_TABLES is None. Call setup_tables() first.")
-
     tau_max = float(tau_max)
     omega = float(omega)
     inc_deg = float(inc_deg)
 
-    tau_grid = INTERP_TABLES["tau_grid"]
+    tau_grid = context.interp_tables["tau_grid"]
     tau0 = float(tau_grid[0])
     tau1 = float(tau_grid[1])
     tau2 = float(tau_grid[2])
 
     if tau_max <= tau0:
-        return float(Q_thin_scalar(tau_max, omega, inc_deg))
+        return float(Q_thin_scalar(tau_max, omega, inc_deg, context=context))
     if tau_max >= tau1:
-        _, Q = interpolate_stokes(tau_max, omega, inc_deg)
+        _, Q = interpolate_stokes(tau_max, omega, inc=inc_deg, context=context)
         return float(Q)
 
     # left: thin value and slope (assume ~tau^2)
-    Q0 = float(Q_thin_scalar(tau0, omega, inc_deg))
+    Q0 = float(Q_thin_scalar(tau0, omega, inc_deg, context=context))
     m0 = 0.0 if tau0 == 0.0 else (2.0 * Q0 / tau0)
 
     # right: RT value and slope
-    _, Q1 = interpolate_stokes(tau1, omega, inc_deg)
-    _, Q0_rt = interpolate_stokes(tau0, omega, inc_deg)
-    _, Q2_rt = interpolate_stokes(tau2, omega, inc_deg)
+    _, Q1 = interpolate_stokes(tau1, omega, inc=inc_deg, context=context)
+    _, Q0_rt = interpolate_stokes(tau0, omega, inc=inc_deg, context=context)
+    _, Q2_rt = interpolate_stokes(tau2, omega, inc=inc_deg, context=context)
     m1 = _deriv_at_x1_quadratic(tau0, tau1, tau2, Q0_rt, Q1, Q2_rt)
 
     # Hermite
     s = (tau_max - tau0) / (tau1 - tau0)
-    h00 =  2.0*s**3 - 3.0*s**2 + 1.0
-    h10 =        s**3 - 2.0*s**2 + s
-    h01 = -2.0*s**3 + 3.0*s**2
-    h11 =        s**3 -       s**2
+    h00 = 2.0 * s**3 - 3.0 * s**2 + 1.0
+    h10 = s**3 - 2.0 * s**2 + s
+    h01 = -2.0 * s**3 + 3.0 * s**2
+    h11 = s**3 - s**2
     dt = tau1 - tau0
 
-    return float(h00*Q0 + h10*dt*m0 + h01*Q1 + h11*dt*m1)
+    return float(h00 * Q0 + h10 * dt * m0 + h01 * Q1 + h11 * dt * m1)
 
 
 # ============================================================
 # 7. High-level emergent API with thin/thick patches
 # ============================================================
 
-def emergent_stokes(tau_max, omega, inc_deg):
+def emergent_stokes(
+    tau_max,
+    omega,
+    inc=None,
+    *,
+    inc_deg=None,
+    context=None,
+    data_dir=DATA_DIR,
+    idir=None,
+    qdir=None,
+    q_table_path=None,
+):
     """
     High-level API:
-        (tau_max, omega, inc_deg [deg]) -> (I, Q)
+        ``(tau_max, omega, inc [deg]) -> (I, Q)``
 
     This function applies:
-      - omega=0 : pure absorption I, Q=0
-      - tau below RT min : thin patches
-          I: analytic_thin_I_scalar
-          Q: Eq.(10) table in [TAU_EQ10_USE_MIN, tau0], B4 below that (if table exists),
-             otherwise fallback Q_thin_scalar
-      - first RT interval [tau0, tau1] : Q bridged smoothly (Eq10->RT, or fallback->RT)
-      - tau above RT max : saturation at tau_max_table (RT)
-      - otherwise : pure RT interpolation
+
+    - ``omega = 0``: pure absorption ``I``, ``Q = 0``
+    - tau below RT min: thin patches
+    - first RT interval ``[tau0, tau1]``: Q bridged smoothly
+    - tau above RT max: saturation at ``tau_max_table`` (RT)
+    - otherwise: pure RT interpolation
     """
-    if INTERP_TABLES is None:
-        raise RuntimeError("INTERP_TABLES is None. Call setup_tables() first.")
+    inc_deg = _resolve_inc_deg(inc=inc, inc_deg=inc_deg)
+    tau_max, omega, inc_deg = _validate_public_inputs(tau_max=tau_max, omega=omega, inc_deg=inc_deg)
+    context = _require_context(
+        context=context,
+        data_dir=data_dir,
+        idir=idir,
+        qdir=qdir,
+        q_table_path=q_table_path,
+    )
 
-    tau_max = float(tau_max)
-    omega = float(omega)
-    inc_deg = float(inc_deg)
-
-    if tau_max <= 0.0:
+    if tau_max == 0.0:
         return 0.0, 0.0
 
-    tau_grid = INTERP_TABLES["tau_grid"]
+    tau_grid = context.interp_tables["tau_grid"]
     tau_min_table = float(tau_grid[0])
     tau_max_table = float(tau_grid[-1])
 
     # first RT interval [tau0, tau1]
-    tau0 = float(tau_grid[0])  # e.g. 0.01
-    tau1 = float(tau_grid[1])  # e.g. 0.03
+    tau0 = float(tau_grid[0])
+    tau1 = float(tau_grid[1])
 
     # omega = 0: pure absorption solution
-    if omega == 0.0:
+    if np.isclose(omega, 0.0):
         I = analytic_thin_I_scalar(tau_max, omega, inc_deg)
         Q = 0.0
         return float(I), float(Q)
@@ -1115,58 +1180,81 @@ def emergent_stokes(tau_max, omega, inc_deg):
     if tau_max < tau_min_table:
         I = analytic_thin_I_scalar(tau_max, omega, inc_deg)
 
-        if Q_THIN_TABLE is not None:
-            tau_grid_thin = np.asarray(Q_THIN_TABLE["tau_grid"], dtype=float)
+        if context.q_thin_table is not None:
+            tau_grid_thin = np.asarray(context.q_thin_table["tau_grid"], dtype=float)
             tau_min_thin = float(tau_grid_thin[0])
             tau_max_thin = float(tau_grid_thin[-1])
 
-            # requested: prefer Eq.(C12) table for tau in [1e-4, 1e-2]
             if tau_max < TAU_EQ10_USE_MIN:
-                # ultra-thin: extend using B4 form matched to Eq10 minimum
-                Q = Q_C8_scalar(tau_max, omega, inc_deg)
+                Q = Q_C8_scalar(tau_max, omega, inc_deg, context=context)
             else:
-                # use Eq10 table (clip to its coverage)
                 tau_for_eq10 = float(np.clip(tau_max, tau_min_thin, tau_max_thin))
-                Q = Q_eqC12_table_scalar(tau_for_eq10, omega, inc_deg)
+                Q = Q_eqC12_table_scalar(tau_for_eq10, omega, inc_deg, context=context)
         else:
-            # no Eq10 table -> fallback
-            Q = Q_thin_scalar(tau_max, omega, inc_deg)
+            Q = Q_thin_scalar(tau_max, omega, inc_deg, context=context)
 
         return float(I), float(Q)
 
-    # 2) first RT interval: bridge Q smoothly (regardless of Eq10 availability)
+    # 2) first RT interval: bridge Q smoothly
     if tau0 <= tau_max <= tau1:
-        I, _ = interpolate_stokes(tau_max, omega, inc_deg)
+        I, _ = interpolate_stokes(tau_max, omega, inc=inc_deg, context=context)
 
-        if Q_THIN_TABLE is not None:
-            Q = Q_bridge_small_tau(tau_max, omega, inc_deg)
+        if context.q_thin_table is not None:
+            Q = Q_bridge_small_tau(tau_max, omega, inc_deg, context=context)
         else:
-            Q = Q_bridge_tau0_tau1_fallback(tau_max, omega, inc_deg)
+            Q = Q_bridge_tau0_tau1_fallback(tau_max, omega, inc_deg, context=context)
 
         return float(I), float(Q)
 
     # 3) very thick: saturate at tau_max_table
     if tau_max > tau_max_table:
-        I_sat, Q_sat = interpolate_stokes(tau_max_table, omega, inc_deg)
+        warnings.warn(
+            "tau_max exceeds the RT-table range; returning the saturated value "
+            f"at tau_max = {tau_max_table}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        I_sat, Q_sat = interpolate_stokes(tau_max_table, omega, inc=inc_deg, context=context)
         return float(I_sat), float(Q_sat)
 
     # 4) intermediate: pure RT interpolation
-    I, Q = interpolate_stokes(tau_max, omega, inc_deg)
+    I, Q = interpolate_stokes(tau_max, omega, inc=inc_deg, context=context)
     return float(I), float(Q)
 
 
-def emergent_polarization(tau_max, omega, inc_deg, mode="Q_over_I"):
+def emergent_polarization(
+    tau_max,
+    omega,
+    inc=None,
+    *,
+    inc_deg=None,
+    context=None,
+    data_dir=DATA_DIR,
+    idir=None,
+    qdir=None,
+    q_table_path=None,
+    mode="Q_over_I",
+):
     """
-    Convenience wrapper computed from (I, Q) without any PF table.
+    Convenience wrapper computed from ``(I, Q)`` without any PF table.
 
-    mode:
-      - "Q_over_I": return Q/I
-      - "abs_Q_over_I": return |Q|/I
-      - "signed_abs": return sign(Q) * |Q|/I (same as Q/I, but explicit)
-
-    Note: This function is optional; it does not reintroduce PF tables.
+    mode
+    ----
+    - ``"Q_over_I"``: return ``Q/I``
+    - ``"abs_Q_over_I"``: return ``|Q|/I``
+    - ``"signed_abs"``: return ``sign(Q) * |Q|/I``
     """
-    I, Q = emergent_stokes(tau_max, omega, inc_deg)
+    I, Q = emergent_stokes(
+        tau_max=tau_max,
+        omega=omega,
+        inc=inc,
+        inc_deg=inc_deg,
+        context=context,
+        data_dir=data_dir,
+        idir=idir,
+        qdir=qdir,
+        q_table_path=q_table_path,
+    )
     I = float(I)
     Q = float(Q)
     if I == 0.0:
@@ -1174,32 +1262,12 @@ def emergent_polarization(tau_max, omega, inc_deg, mode="Q_over_I"):
 
     if mode == "Q_over_I":
         return float(Q / I)
-    elif mode == "abs_Q_over_I":
+    if mode == "abs_Q_over_I":
         return float(abs(Q) / I)
-    elif mode == "signed_abs":
+    if mode == "signed_abs":
         return float(np.sign(Q) * (abs(Q) / I))
-    else:
-        raise ValueError(f"unknown mode: {mode}")
+    raise ValueError(f"unknown mode: {mode}")
 
 
-# ============================================================
-# 8. Initialize tables and simple sanity check
-# ============================================================
-
-TABLES, INTERP_TABLES = setup_tables(DATA_DIR)
-'''
-print("Loaded tau grid and available kinds (loaded from files):")
-for tau in sorted(TABLES.keys()):
-    kinds = [k for k in ["I", "Q"] if k in TABLES[tau]]
-    print(f"  tau = {tau:g}  kinds: {kinds}")
-
-print("\nSanity check for tau grids:")
-print("RT tau_grid[:3] =", INTERP_TABLES["tau_grid"][:3])
-print("Q_THIN_TABLE loaded? ->", Q_THIN_TABLE is not None)
-if Q_THIN_TABLE is not None:
-    print("Eq10 tau_grid[0:3]  =", Q_THIN_TABLE["tau_grid"][:3])
-    print("Eq10 tau_grid[-3:] =", Q_THIN_TABLE["tau_grid"][-3:])
-    print("TAU_EQ10_USE_MIN =", TAU_EQ10_USE_MIN)
-'''
-
-
+# Backward-compatible alias with a clearer name
+load_stokes_context = setup_tables

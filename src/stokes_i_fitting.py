@@ -1,5 +1,9 @@
-import glob
-import os
+"""Fitting utilities for emergent Stokes I."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
 
 import lmfit
 import matplotlib.pyplot as plt
@@ -11,18 +15,74 @@ from scipy.interpolate import interp1d
 # Constants
 # =========================
 EPS = 1e-12
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-DEFAULT_INDIR_I = os.path.join(PROJECT_ROOT, "data", "StokesI_emergent")
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+DEFAULT_INDIR_I = PROJECT_ROOT / "data" / "StokesI_emergent"
 
-# =========================
-# Module-level data loaded from .inp files
-# =========================
-tau_max_values = None
-omega_values = None
-mu_pos_grid = None
-I_surface = None
-_loaded_indir = None
+MIN_VALID_INC_DEG = 0.0
+MAX_VALID_INC_DEG = 80.0
+MAX_VALID_OMEGA = 0.9
+
+
+@dataclass(frozen=True)
+class StokesIData:
+    """Container for the Stokes-I fitting tables."""
+
+    tau_max_values: np.ndarray
+    omega_values: np.ndarray
+    mu_pos_grid: np.ndarray
+    I_surface: np.ndarray
+    indir: Path
+
+
+def _resolve_angle_deg(inc=None, angle_deg=None, *, default=45.0):
+    """
+    Resolve the public inclination argument.
+
+    Both ``inc`` and ``angle_deg`` are accepted for backward compatibility.
+    """
+    if inc is None and angle_deg is None:
+        return float(default)
+
+    if angle_deg is None:
+        angle_deg = inc
+    elif inc is not None and not np.isclose(float(inc), float(angle_deg)):
+        raise ValueError("inc and angle_deg were both given but do not match.")
+
+    return float(angle_deg)
+
+
+def _validate_fit_inputs(angle_deg, degree):
+    """Validate public inputs for the fitting workflow."""
+    if not (MIN_VALID_INC_DEG <= float(angle_deg) <= MAX_VALID_INC_DEG):
+        raise ValueError(
+            "inc must satisfy "
+            f"{MIN_VALID_INC_DEG} <= inc <= {MAX_VALID_INC_DEG} degrees."
+        )
+
+    if int(degree) != degree or degree < 0:
+        raise ValueError("degree must be a non-negative integer.")
+
+
+def _validate_evaluation_inputs(omega, tau_max, mu):
+    """Validate user-supplied evaluation inputs."""
+    omega = np.asarray(omega, dtype=float)
+    tau_max = np.asarray(tau_max, dtype=float)
+    mu = float(mu)
+
+    if np.any((omega < 0.0) | (omega > MAX_VALID_OMEGA)):
+        raise ValueError(
+            "omega is outside the validated range for this fitting formula. "
+            f"Use 0.0 <= omega <= {MAX_VALID_OMEGA}."
+        )
+
+    if np.any(tau_max < 0.0):
+        raise ValueError("tau_max must satisfy tau_max >= 0.0.")
+
+    if not (0.0 < mu <= 1.0):
+        raise ValueError("mu must satisfy 0.0 < mu <= 1.0.")
+
+    return omega, tau_max, mu
 
 
 # =========================
@@ -33,11 +93,12 @@ def read_single_inp(filepath):
     Read a single .inp file and return
     omega, tau_max, mu_pos, and I_pos.
     """
+    filepath = Path(filepath)
     omega = None
     tau_max = None
     n_mu = None
 
-    with open(filepath, "r", encoding="utf-8") as f:
+    with filepath.open("r", encoding="utf-8") as f:
         header_lines = []
         data_lines = []
 
@@ -61,51 +122,62 @@ def read_single_inp(filepath):
         raise ValueError(f"{filepath}: tau_max not found in header")
     if n_mu is None:
         raise ValueError(f"{filepath}: n_mu not found in header")
-    if len(data_lines) == 0:
+    if not data_lines:
         raise ValueError(f"{filepath}: no data rows found")
 
     arr = np.loadtxt(data_lines)
     if arr.ndim == 1:
         arr = arr.reshape(1, 2)
 
-    mu_pos = arr[:, 0]
-    I_pos = arr[:, 1]
+    mu_pos = np.asarray(arr[:, 0], dtype=float)
+    i_pos = np.asarray(arr[:, 1], dtype=float)
 
     if len(mu_pos) != n_mu:
         raise ValueError(f"{filepath}: header n_mu and actual row count do not match")
 
-    return omega, tau_max, mu_pos, I_pos
+    return float(omega), float(tau_max), mu_pos, i_pos
 
 
 # =========================
-# Load all .inp files into module-level arrays
+# Load all .inp files into an explicit data bundle
 # =========================
 def load_I_only_inp(indir=DEFAULT_INDIR_I):
     """
     Read a set of .inp files with headers and reconstruct
     tau_max_values, omega_values, mu_pos_grid, and I_surface.
-    """
-    global tau_max_values, omega_values, mu_pos_grid, I_surface, _loaded_indir
 
-    filelist = sorted(glob.glob(os.path.join(indir, "*.inp")))
-    if len(filelist) == 0:
+    Returns
+    -------
+    StokesIData
+        Explicit data bundle that can be passed to other functions instead of
+        relying on module-level global variables.
+    """
+    indir = Path(indir)
+
+    filelist = sorted(indir.glob("*.inp"))
+    if not filelist:
         raise FileNotFoundError(f"no inp files found in {indir}")
 
-    records = []
+    records = {}
     tau_set = set()
     omega_set = set()
 
     for filepath in filelist:
-        omega, tau_max, mu_pos, I_pos = read_single_inp(filepath)
-        records.append(
-            {
-                "filepath": filepath,
-                "omega": omega,
-                "tau_max": tau_max,
-                "mu_pos": mu_pos,
-                "I_pos": I_pos,
-            }
-        )
+        omega, tau_max, mu_pos, i_pos = read_single_inp(filepath)
+        key = (float(omega), float(tau_max))
+        if key in records:
+            raise ValueError(
+                f"Duplicate Stokes-I file found for omega={omega}, "
+                f"tau_max={tau_max}: {filepath}"
+            )
+
+        records[key] = {
+            "filepath": filepath,
+            "omega": omega,
+            "tau_max": tau_max,
+            "mu_pos": mu_pos,
+            "I_pos": i_pos,
+        }
         tau_set.add(tau_max)
         omega_set.add(omega)
 
@@ -119,10 +191,10 @@ def load_I_only_inp(indir=DEFAULT_INDIR_I):
     omega_to_idx = {v: i for i, v in enumerate(omega_values)}
 
     mu_pos_grid = np.full((n_tau,), None, dtype=object)
-    I_surface = np.empty((n_omega, n_tau), dtype=object)
+    i_surface = np.empty((n_omega, n_tau), dtype=object)
     filled = np.zeros((n_omega, n_tau), dtype=bool)
 
-    for rec in records:
+    for rec in records.values():
         i_tau = tau_to_idx[rec["tau_max"]]
         i_omega = omega_to_idx[rec["omega"]]
 
@@ -137,43 +209,92 @@ def load_I_only_inp(indir=DEFAULT_INDIR_I):
                     f"between files. File: {rec['filepath']}"
                 )
 
-        I_surface[i_omega, i_tau] = rec["I_pos"]
+        i_surface[i_omega, i_tau] = rec["I_pos"]
         filled[i_omega, i_tau] = True
 
     if not np.all(filled):
         missing = np.argwhere(~filled)
         raise ValueError(f"Some (omega, tau_max) pairs are missing: {missing}")
 
-    _loaded_indir = indir
-    return tau_max_values, omega_values, mu_pos_grid, I_surface
+    return StokesIData(
+        tau_max_values=tau_max_values,
+        omega_values=omega_values,
+        mu_pos_grid=mu_pos_grid,
+        I_surface=i_surface,
+        indir=indir,
+    )
+
+
+def _coerce_i_surface_inputs(data=None, mu_pos_grid=None, I_surface=None):
+    """
+    Accept either a ``StokesIData`` bundle or the raw arrays used in the
+    original public API.
+    """
+    if data is not None:
+        return data.mu_pos_grid, data.I_surface
+
+    if mu_pos_grid is None or I_surface is None:
+        raise TypeError(
+            "Pass either data=<StokesIData> or both mu_pos_grid and I_surface."
+        )
+
+    return mu_pos_grid, I_surface
 
 
 # =========================
 # Interpolate Stokes I to a requested angle
 # =========================
-def get_I_at_angle_fast(angle_deg, mu_pos_grid, I_surface):
-    """Interpolate the emergent Stokes I onto the requested viewing angle."""
+def get_I_at_angle_fast(
+    inc=45.0,
+    mu_pos_grid=None,
+    I_surface=None,
+    data=None,
+    angle_deg=None,
+):
+    """
+    Interpolate the emergent Stokes I onto the requested viewing angle.
+
+    Parameters
+    ----------
+    inc : float, optional
+        Inclination angle in degrees.
+    mu_pos_grid, I_surface : ndarray, optional
+        Raw arrays kept for backward compatibility with the original API.
+    data : StokesIData, optional
+        Explicit data bundle returned by :func:`load_I_only_inp`.
+    angle_deg : float or None, optional
+        Backward-compatible alias for ``inc``.
+    """
+    angle_deg = _resolve_angle_deg(inc=inc, angle_deg=angle_deg)
+    _validate_fit_inputs(angle_deg=angle_deg, degree=0)
+    mu_pos_grid, I_surface = _coerce_i_surface_inputs(
+        data=data,
+        mu_pos_grid=mu_pos_grid,
+        I_surface=I_surface,
+    )
+
     mu = np.cos(np.deg2rad(angle_deg))
 
     n_omega = I_surface.shape[0]
     n_tau = I_surface.shape[1]
-    I_angle = np.zeros((n_omega, n_tau))
+    i_angle = np.zeros((n_omega, n_tau))
 
     for omega_idx in range(n_omega):
         for tau_idx in range(n_tau):
             mu_grid = mu_pos_grid[tau_idx]
-            I_grid = I_surface[omega_idx, tau_idx]
+            i_grid = I_surface[omega_idx, tau_idx]
 
-            f = interp1d(mu_grid, I_grid, kind="cubic")
-            I_angle[omega_idx, tau_idx] = float(f(mu))
+            f = interp1d(mu_grid, i_grid, kind="cubic")
+            i_angle[omega_idx, tau_idx] = float(f(mu))
 
-    return I_angle
+    return i_angle
 
 
 # =========================
 # Stokes I model
 # =========================
 def stokes_i_model_with_mu(tau_max, A_I, B_I, I_conv, omega_I, mu):
+    """Fitting formula for emergent Stokes I with fixed ``mu``."""
     tau_max = np.asarray(tau_max)
 
     y_left = tau_max / mu * (1.0 - omega_I)
@@ -186,7 +307,7 @@ def stokes_i_model_with_mu(tau_max, A_I, B_I, I_conv, omega_I, mu):
 
 
 def make_model_func_fixed_mu(mu):
-    """Return a wrapper function with mu fixed for lmfit."""
+    """Return a wrapper function with ``mu`` fixed for lmfit."""
 
     def model_func_fixed_mu(tau_max, A_I, B_I, I_conv, omega_I):
         return stokes_i_model_with_mu(tau_max, A_I, B_I, I_conv, omega_I, mu)
@@ -198,6 +319,7 @@ def make_model_func_fixed_mu(mu):
 # Convert a polynomial to a LaTeX string
 # =========================
 def poly_to_latex(poly, var=r"\omega", precision=3):
+    """Convert ``np.poly1d`` to a compact LaTeX-like string."""
     coeffs = np.array(poly.c, dtype=float)
     deg = len(coeffs) - 1
     terms = []
@@ -222,7 +344,7 @@ def poly_to_latex(poly, var=r"\omega", precision=3):
             else:
                 term = f"{abs(c_round):.{precision}g}{var}^{power}"
 
-        if len(terms) == 0:
+        if not terms:
             terms.append(("-" if c_round < 0 else "") + term)
         else:
             terms.append((" - " if c_round < 0 else " + ") + term)
@@ -233,54 +355,56 @@ def poly_to_latex(poly, var=r"\omega", precision=3):
 # =========================
 # Helper function that performs the fit and generates the plot
 # =========================
-def fit_and_plot_I(inc=45.0, angle_deg=None, degree=4, indir=DEFAULT_INDIR_I, savepath=None, show=True):
+def fit_and_plot_I(
+    inc=45.0,
+    angle_deg=None,
+    degree=4,
+    indir=DEFAULT_INDIR_I,
+    savepath=None,
+    show=True,
+    data=None,
+):
     """
-    Perform the Stokes I fitting and make the plot.
+    Perform the Stokes-I fitting and make the plot.
 
     Parameters
     ----------
     inc : float, optional
-        Inclination angle in degrees. This is the main public argument used in
-        the example notebook.
+        Inclination angle in degrees. Use keyword arguments when calling this
+        function in user-facing examples.
     angle_deg : float or None, optional
-        Alternative name for the inclination angle. If given, it overrides inc.
+        Backward-compatible alias for ``inc``. If given, it overrides ``inc``.
     degree : int, optional
         Polynomial degree for fitting the omega dependence.
-    indir : str, optional
-        Directory containing .inp files.
-    savepath : str or None, optional
+    indir : str or Path, optional
+        Directory containing .inp files. Ignored when ``data`` is given.
+    savepath : str or Path or None, optional
         Output figure path.
     show : bool, optional
         If True, show the figure.
+    data : StokesIData or None, optional
+        Explicit data bundle returned by :func:`load_I_only_inp`. Passing this
+        avoids module-level global state and repeated reloading.
     """
-    global tau_max_values, omega_values, mu_pos_grid, I_surface, _loaded_indir
+    angle_deg = _resolve_angle_deg(inc=inc, angle_deg=angle_deg)
+    _validate_fit_inputs(angle_deg=angle_deg, degree=degree)
 
-    if angle_deg is None:
-        angle_deg = inc
-
-    if (
-        tau_max_values is None
-        or omega_values is None
-        or mu_pos_grid is None
-        or I_surface is None
-        or _loaded_indir != indir
-    ):
-        load_I_only_inp(indir=indir)
+    if data is None:
+        data = load_I_only_inp(indir=indir)
 
     mu = np.cos(np.deg2rad(angle_deg))
-
-    I_angle = get_I_at_angle_fast(angle_deg, mu_pos_grid, I_surface)
+    i_angle = get_I_at_angle_fast(inc=angle_deg, data=data)
 
     model_fixed_mu = make_model_func_fixed_mu(mu)
     my_model = lmfit.Model(model_fixed_mu)
 
-    A_I = np.zeros(len(omega_values))
-    B_I = np.zeros(len(omega_values))
-    I_conv = np.zeros(len(omega_values))
-    omega_I = np.zeros(len(omega_values))
+    A_I = np.zeros(len(data.omega_values))
+    B_I = np.zeros(len(data.omega_values))
+    I_conv = np.zeros(len(data.omega_values))
+    omega_I = np.zeros(len(data.omega_values))
 
-    for omega_idx in range(len(omega_values)):
-        ydata = I_angle[omega_idx, :]
+    for omega_idx in range(len(data.omega_values)):
+        ydata = i_angle[omega_idx, :]
         weights = 1.0 / np.maximum(np.abs(ydata), EPS)
 
         params = my_model.make_params(A_I=1.0, B_I=0.5, I_conv=1.0, omega_I=0.5)
@@ -291,7 +415,7 @@ def fit_and_plot_I(inc=45.0, angle_deg=None, degree=4, indir=DEFAULT_INDIR_I, sa
 
         results = my_model.fit(
             ydata,
-            tau_max=tau_max_values,
+            tau_max=data.tau_max_values,
             params=params,
             weights=weights,
             nan_policy="omit",
@@ -304,15 +428,15 @@ def fit_and_plot_I(inc=45.0, angle_deg=None, degree=4, indir=DEFAULT_INDIR_I, sa
         I_conv[omega_idx] = results.best_values["I_conv"]
         omega_I[omega_idx] = results.best_values["omega_I"]
 
-    poly_A = np.poly1d(np.polyfit(omega_values, A_I, degree))
-    poly_B = np.poly1d(np.polyfit(omega_values, B_I, degree))
-    poly_I = np.poly1d(np.polyfit(omega_values, I_conv, degree))
-    poly_w = np.poly1d(np.polyfit(omega_values, omega_I, degree))
+    poly_A = np.poly1d(np.polyfit(data.omega_values, A_I, degree))
+    poly_B = np.poly1d(np.polyfit(data.omega_values, B_I, degree))
+    poly_I = np.poly1d(np.polyfit(data.omega_values, I_conv, degree))
+    poly_w = np.poly1d(np.polyfit(data.omega_values, omega_I, degree))
 
-    A_I_fit = poly_A(omega_values)
-    B_I_fit = poly_B(omega_values)
-    I_conv_fit = poly_I(omega_values)
-    omega_I_fit = poly_w(omega_values)
+    A_I_fit = poly_A(data.omega_values)
+    B_I_fit = poly_B(data.omega_values)
+    I_conv_fit = poly_I(data.omega_values)
+    omega_I_fit = poly_w(data.omega_values)
 
     latex_A = poly_to_latex(poly_A)
     latex_B = poly_to_latex(poly_B)
@@ -359,12 +483,12 @@ def fit_and_plot_I(inc=45.0, angle_deg=None, degree=4, indir=DEFAULT_INDIR_I, sa
 
     tau_plot = np.arange(0.0, 15.0, 0.01)
 
-    for omega_idx in range(len(omega_values)):
-        current_omega = omega_values[omega_idx]
+    for omega_idx in range(len(data.omega_values)):
+        current_omega = data.omega_values[omega_idx]
 
         ax[0].scatter(
-            tau_max_values,
-            I_angle[omega_idx, :],
+            data.tau_max_values,
+            i_angle[omega_idx, :],
             label=fr"$\omega={current_omega}$",
             s=40,
         )
@@ -409,21 +533,23 @@ def fit_and_plot_I(inc=45.0, angle_deg=None, degree=4, indir=DEFAULT_INDIR_I, sa
     ax[0].add_artist(legend1)
     ax[0].legend(h_all, l_all, loc="upper left", fontsize=20, bbox_to_anchor=(1.01, 1))
 
-    X, Y = np.meshgrid(tau_max_values, omega_values)
-    error = np.zeros((len(omega_values), len(tau_max_values)))
+    X, Y = np.meshgrid(data.tau_max_values, data.omega_values)
+    error = np.zeros((len(data.omega_values), len(data.tau_max_values)))
 
-    for omega_idx in range(len(omega_values)):
-        for tau_idx in range(len(tau_max_values)):
+    for omega_idx in range(len(data.omega_values)):
+        for tau_idx in range(len(data.tau_max_values)):
             model_val = stokes_i_model_with_mu(
-                tau_max_values[tau_idx],
+                data.tau_max_values[tau_idx],
                 A_I_fit[omega_idx],
                 B_I_fit[omega_idx],
                 I_conv_fit[omega_idx],
                 omega_I_fit[omega_idx],
                 mu,
             )
-            data_val = I_angle[omega_idx, tau_idx]
-            error[omega_idx, tau_idx] = np.abs(100.0 * (data_val - model_val) / max(np.abs(data_val), EPS))
+            data_val = i_angle[omega_idx, tau_idx]
+            error[omega_idx, tau_idx] = np.abs(
+                100.0 * (data_val - model_val) / max(np.abs(data_val), EPS)
+            )
 
     mesh = ax[1].pcolormesh(X, Y, error, shading="auto", cmap="viridis", vmin=0, vmax=3)
     cbar = fig.colorbar(mesh, ax=ax[1])
@@ -433,12 +559,14 @@ def fit_and_plot_I(inc=45.0, angle_deg=None, degree=4, indir=DEFAULT_INDIR_I, sa
         fig.savefig(savepath, bbox_inches="tight")
     if show:
         plt.show()
+    else:
+        plt.close(fig)
 
     return {
         "angle_deg": angle_deg,
         "degree": degree,
         "mu": mu,
-        "I_angle": I_angle,
+        "I_angle": i_angle,
         "A_I": A_I,
         "B_I": B_I,
         "I_conv": I_conv,
@@ -448,6 +576,7 @@ def fit_and_plot_I(inc=45.0, angle_deg=None, degree=4, indir=DEFAULT_INDIR_I, sa
         "poly_I": poly_I,
         "poly_w": poly_w,
         "error": error,
+        "data": data,
     }
 
 
@@ -456,46 +585,30 @@ read_single_light_inp = read_single_inp
 load_I_only_light_inp = load_I_only_inp
 
 
-__all__ = [
-    "fit_and_plot_I",
-    "load_I_only_inp",
-    "read_single_inp",
-    "get_I_at_angle_fast",
-    "stokes_i_model_with_mu",
-]
-
-
 # =========================
 # Evaluate Stokes I from fitted polynomial coefficients
 # =========================
 def evaluate_I_from_polynomial(omega, tau_max, mu, poly_A, poly_B, poly_I, poly_w):
     """
-    Evaluate the fitted Stokes I model at the requested omega and tau_max.
+    Evaluate the fitted Stokes-I model at the requested omega and tau_max.
 
     Parameters
     ----------
     omega : float or array-like
-        Single-scattering albedo. Valid domain: 0 <= omega < 1.
+        Single-scattering albedo. Validated range: 0.0 <= omega <= 0.9.
     tau_max : float or array-like
-        Maximum optical depth. Valid domain: tau_max > 0.
+        Maximum optical depth. Must satisfy tau_max >= 0.0.
     mu : float
         Cosine of the viewing angle.
     poly_A, poly_B, poly_I, poly_w : np.poly1d
-        Polynomial functions of omega returned by fit_and_plot_I().
+        Polynomial functions of omega returned by :func:`fit_and_plot_I`.
 
     Returns
     -------
-    float or ndarray or None
-        Evaluated Stokes I value. Returns None if the requested input is outside
-        the valid domain.
+    float or ndarray
+        Evaluated Stokes-I value.
     """
-    omega = np.asarray(omega, dtype=float)
-    tau_max = np.asarray(tau_max, dtype=float)
-
-    invalid_mask = (omega < 0.0) | (omega >= 1.0) | (tau_max <= 0.0)
-    if np.any(invalid_mask):
-        print("Stokes I is undefined for the requested input. Use 0 <= omega < 1 and tau_max > 0.")
-        return None
+    omega, tau_max, mu = _validate_evaluation_inputs(omega=omega, tau_max=tau_max, mu=mu)
 
     A_val = poly_A(omega)
     B_val = poly_B(omega)
@@ -511,24 +624,14 @@ def evaluate_I_from_polynomial(omega, tau_max, mu, poly_A, poly_B, poly_I, poly_
 
 def evaluate_I_from_fit_result(omega, tau_max, fit_result):
     """
-    Evaluate the fitted Stokes I value using the result dictionary returned by
-    fit_and_plot_I().
-
-    Parameters
-    ----------
-    omega : float or array-like
-        Single-scattering albedo. Valid domain: 0 <= omega < 1.
-    tau_max : float or array-like
-        Maximum optical depth. Valid domain: tau_max > 0.
-    fit_result : dict
-        Dictionary returned by fit_and_plot_I().
-
-    Returns
-    -------
-    float or ndarray or None
-        Evaluated Stokes I value. Returns None if the requested input is outside
-        the valid domain.
+    Evaluate the fitted Stokes-I value using the dictionary returned by
+    :func:`fit_and_plot_I`.
     """
+    required_keys = ["mu", "poly_A", "poly_B", "poly_I", "poly_w"]
+    missing_keys = [key for key in required_keys if key not in fit_result]
+    if missing_keys:
+        raise KeyError(f"fit_result is missing required keys: {missing_keys}")
+
     return evaluate_I_from_polynomial(
         omega=omega,
         tau_max=tau_max,
@@ -538,9 +641,3 @@ def evaluate_I_from_fit_result(omega, tau_max, fit_result):
         poly_I=fit_result["poly_I"],
         poly_w=fit_result["poly_w"],
     )
-
-
-__all__ += [
-    "evaluate_I_from_polynomial",
-    "evaluate_I_from_fit_result",
-]
