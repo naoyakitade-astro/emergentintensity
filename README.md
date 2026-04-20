@@ -51,37 +51,18 @@ print(I, Q)
 ### stokes_i_fitting.py
 
 ```python
-from stokes_i_fitting import fit_and_plot_I
-
-result = fit_and_plot_I(inc=45.0)
-```
-
-If you want to reuse already loaded data and avoid hidden global state:
-
-```python
 from stokes_i_fitting import fit_and_plot_I, load_I_only_inp
 
-data = load_I_only_inp("data/StokesI_emergent")
+data = load_I_only_inp()
 result = fit_and_plot_I(inc=45.0, data=data)
 ```
 
 ### pf_fitting.py
 
 ```python
-from pf_fitting import fit_and_plot_PF
-
-result = fit_and_plot_PF(inc=45.0)
-```
-
-If you want to reuse already loaded data and avoid hidden global state:
-
-```python
 from pf_fitting import fit_and_plot_PF, load_IQ_inp
 
-data = load_IQ_inp(
-    indir_I="data/StokesI_emergent",
-    indir_Q="data/StokesQ_emergent",
-)
+data = load_IQ_inp()
 result = fit_and_plot_PF(inc=45.0, data=data)
 ```
 
