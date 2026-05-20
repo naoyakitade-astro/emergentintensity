@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the following paper."
+
+title: "Millimeter dust continuum and polarization in protoplanetary disks with scattering: A slab model"
+
+authors:
+  - family-names: Kitade
+    given-names: Naoya
+  - family-names: Kataoka
+    given-names: Akimasa
+
+year: 2026
+
+repository-code: "https://github.com/naoyakitade-astro/emergentintensity"
+
+preferred-citation:
+  type: article
+  title: "Millimeter dust continuum and polarization in protoplanetary disks with scattering: A slab model"
+  authors:
+    - family-names: Kitade
+      given-names: Naoya
+    - family-names: Kataoka
+      given-names: Akimasa
+  year: 2026
+
+  url: "https://arxiv.org/abs/2605.15014"
+
+
