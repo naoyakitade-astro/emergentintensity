@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software or the associated radiative-transfer tables, please cite the paper below."
+title: "emergentintensity"
+type: software
+authors:
+  - family-names: "Kitade"
+    given-names: "Naoya"
+repository-code: "https://github.com/naoyakitade-astro/emergentintensity"
+license: "MIT"
+
+preferred-citation:
+  type: article
+  authors:
+    - family-names: "Kitade"
+      given-names: "Naoya"
+    - family-names: "Kataoka"
+      given-names: "Akimasa"
+  title: "Millimeter dust continuum and polarization in protoplanetary disks with scattering: A slab model"
+  journal: "Astronomy & Astrophysics"
+  year: 2026
+  volume: 710
+  doi: "10.1051/0004-6361/202659582"
+  url: "https://doi.org/10.1051/0004-6361/202659582"

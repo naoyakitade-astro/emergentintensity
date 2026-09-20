@@ -12,9 +12,10 @@ This repository provides three Python modules for radiative-transfer-table-based
 
 If you use this code or the tables, please cite:
 
-- Kitade & Kataoka (2026),  
-  *Millimeter dust continuum and polarization in protoplanetary disks with scattering: A slab model*,  
-  [arXiv:2605.15014](https://arxiv.org/abs/2605.15014)
+> Kitade, N. & Kataoka, A. 2026,  
+> *Millimeter dust continuum and polarization in protoplanetary disks with scattering: A slab model*,  
+> Astronomy & Astrophysics, 710.  
+> https://doi.org/10.1051/0004-6361/202659582
 
 ## Installation
 
